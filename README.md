@@ -68,6 +68,12 @@ report to the terminal.
 
 This project uses `uv` as the package manager.
 
+If you do not have `uv` installed:
+
+```bash
+pip install uv
+```
+
 Install dependencies:
 
 ```powershell
@@ -80,10 +86,17 @@ If `uv` is installed but not on `PATH`, use:
 python -m uv sync --group dev
 ```
 
-Run a text report:
+If Repo Cleanser is installed in the current development repo:
 
 ```powershell
 uv run repo-cleanser scan D:\path\to\repo
+```
+
+If Repo Cleanser is installed in an environment where `repo-cleanser` is already
+on `PATH`:
+
+```bash
+repo-cleanser scan /path/to/project
 ```
 
 Write a JSON report:
@@ -100,10 +113,18 @@ uv run repo-cleanser scan D:\path\to\repo --include-supporting
 
 ## Example: Scanning a Repository
 
-To scan a different repository, point Repo Cleanser at that path:
+To scan a different repository, point Repo Cleanser at that path.
+
+If Repo Cleanser is installed globally:
 
 ```bash
 repo-cleanser scan /path/to/project
+```
+
+If you are running from inside the development repo:
+
+```bash
+uv run repo-cleanser scan /path/to/project
 ```
 
 Repo Cleanser analyzes:
@@ -175,11 +196,37 @@ path_pattern = "scratch-notes.md"
 reason = "Intentional local scratch note."
 ```
 
+Another practical example:
+
+```toml
+ignored_paths = [
+  "node_modules",
+  "dist",
+  ".next",
+  "archive/tmp"
+]
+
+generated_paths = [
+  "coverage",
+  "storybook-static"
+]
+
+[[mirrored_docs]]
+source = "documentation"
+publish = "public/docs"
+
+[[advisory_suppressions]]
+finding = "duplicate-docs"
+path_pattern = "public/docs/*"
+reason = "Publish mirror of documentation."
+```
+
 Config rules:
 
 - `ignored_paths` and `generated_paths` are repo-relative path patterns
 - ignored paths are skipped during scanning
-- generated paths reduce expected noise from build or publish output
+- generated paths reduce expected noise from build or publish output, but do
+  not suppress unrelated structural findings
 - `mirrored_docs` declares expected source-to-publish doc mirrors so publish
   targets do not generate duplicate-noise on their own
 - `advisory_suppressions` silence selected advisory findings, but they remain
@@ -187,6 +234,9 @@ Config rules:
 - config can reduce expected noise, but it does not mark any path as safe
 
 ## Report Categories
+
+Repo Cleanser internally classifies files into the following advisory
+categories:
 
 - `canonical`: source-of-truth docs or root governance/config entrypoints
 - `supporting`: normal implementation, tests, scripts, and supporting docs
