@@ -217,6 +217,10 @@ class RepoReport:
     recommended_actions: list[str]
     repository_risks: list[str]
 
+    @property
+    def skipped_paths(self) -> list[str]:
+        return self.skipped_directories
+
     def category_counts(self) -> dict[str, int]:
         counts = Counter(assessment.category.value for assessment in self.assessments)
         return dict(sorted(counts.items()))
@@ -225,6 +229,7 @@ class RepoReport:
         return {
             "root": self.root,
             "scanned_files": self.scanned_files,
+            "skipped_paths": self.skipped_paths,
             "skipped_directories": self.skipped_directories,
             "canonical_doc_chain": self.canonical_doc_chain,
             "config_summary": self.config_summary.to_dict(),

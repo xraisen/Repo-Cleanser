@@ -91,6 +91,8 @@ def test_scan_command_writes_json_report(tmp_path: Path) -> None:
     assert "validation_readiness" in payload
     assert "config_summary" in payload
     assert "suppressed_findings" in payload
+    assert "skipped_paths" in payload
+    assert payload["skipped_paths"] == payload["skipped_directories"]
     assert "broad_validation_triggers" in payload["validation_readiness"]
     assert "narrow_validation_candidates" in payload["validation_readiness"]
 

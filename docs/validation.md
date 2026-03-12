@@ -72,10 +72,19 @@ not quietly reappear:
 - invalid UTF-8 or BOM-prefixed config files failing in uncontrolled ways
 - unsafe control or escape characters leaking into terminal report output
 - config paths escaping the repository path space
-- mirrored-doc roots overlapping or suppression finding kinds being blank
+- mirrored-doc roots overlapping within or across entries, or suppression
+  finding kinds being blank
+- unknown suppression finding ids silently disabling expected suppressions
+- duplicate suppression targets with conflicting reasons behaving
+  order-dependently
+- single-star path patterns matching nested paths unexpectedly
+- question-mark or character-class path patterns losing wildcard behavior
 - report output overwriting existing files or writing into the scanned repo
 - symlinked paths leaking outside the intended repository boundary
+- symlinked or broken-symlink root config silently steering scan rules
 - unreadable walked files or directories being skipped silently
+- JSON skip reporting drifting from actual behavior after file-level skip
+  handling was added
 
 ## Fallback Behavior
 

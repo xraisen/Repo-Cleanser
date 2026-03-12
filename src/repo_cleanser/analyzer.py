@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 import tomllib
@@ -140,6 +139,16 @@ TEMPORARY_TOKENS = {"draft", "scratch", "temp", "tmp", "wip"}
 STALE_TOKENS = {"backup", "bak", "copy", "deprecated", "final", "obsolete", "old"}
 HISTORICAL_TOKENS = {"archive", "archived", "changelog", "history", "historical"}
 MIGRATION_TOKENS = {"legacy", "migrated", "new", "next"} | STALE_TOKENS | TEMPORARY_TOKENS
+SUPPORTED_FINDING_KINDS = {
+    "duplicate-docs",
+    "module-boundary",
+    "orphaned-artifacts",
+    "partial-migration",
+    "safe-detach-risk",
+    "shared-core-coupling",
+    "unclear-authority",
+    "validation-readiness",
+}
 MAX_TEXT_BYTES = 250_000
 SIMILARITY_THRESHOLD = 0.82
 VARIANT_SIMILARITY_THRESHOLD = 0.55
@@ -285,8 +294,21 @@ class FileRecord:
 
 def _load_repo_config(root: Path) -> RepoConfigSummary:
     config_path = root / CONFIG_FILE_NAME
-    if not config_path.exists():
+    try:
+        config_path.lstat()
+    except FileNotFoundError:
         return RepoConfigSummary()
+    except OSError as exc:
+        raise ValueError(f"Unable to inspect '{CONFIG_FILE_NAME}': {exc}") from exc
+    if _path_is_symlink(config_path):
+        raise ValueError(
+            f"'{CONFIG_FILE_NAME}' must be a regular file at the repository root."
+        )
+    root_resolved = root.resolve()
+    if not _path_stays_within_root(config_path, root_resolved):
+        raise ValueError(
+            f"'{CONFIG_FILE_NAME}' must stay inside the repository root."
+        )
 
     try:
         raw_config = tomllib.loads(config_path.read_bytes().decode("utf-8-sig"))
@@ -2346,7 +2368,19 @@ def _load_mirrored_docs_config(raw_value: object) -> list[ConfiguredMirror]:
     deduped: dict[tuple[str, str], ConfiguredMirror] = {}
     for mirror in mirrors:
         deduped[(mirror.source, mirror.publish)] = mirror
-    return list(deduped.values())
+
+    unique_mirrors = list(deduped.values())
+    for index, mirror in enumerate(unique_mirrors):
+        for other_mirror in unique_mirrors[index + 1 :]:
+            for left_root in (mirror.source, mirror.publish):
+                for right_root in (other_mirror.source, other_mirror.publish):
+                    if _paths_overlap(left_root, right_root):
+                        raise ValueError(
+                            "'mirrored_docs' paths must be distinct non-overlapping "
+                            "repo-relative roots across the full config."
+                        )
+
+    return unique_mirrors
 
 
 def _load_advisory_suppressions_config(
@@ -2377,10 +2411,14 @@ def _load_advisory_suppressions_config(
                 "'advisory_suppressions' entries must include a non-empty 'reason'."
             )
 
-        normalized_finding = finding.strip()
+        normalized_finding = finding.strip().casefold()
         if not normalized_finding:
             raise ValueError(
                 "'advisory_suppressions' entries must include a non-empty 'finding'."
+            )
+        if normalized_finding not in SUPPORTED_FINDING_KINDS:
+            raise ValueError(
+                "'advisory_suppressions.finding' must use a supported finding id."
             )
 
         suppressions.append(
@@ -2394,13 +2432,18 @@ def _load_advisory_suppressions_config(
             )
         )
 
-    deduped: dict[tuple[str, str, str], ConfiguredSuppression] = {}
+    deduped: dict[tuple[str, str], ConfiguredSuppression] = {}
     for suppression in suppressions:
         key = (
             suppression.finding,
             suppression.path_pattern,
-            suppression.reason,
         )
+        existing = deduped.get(key)
+        if existing is not None and existing.reason != suppression.reason:
+            raise ValueError(
+                "'advisory_suppressions' entries must not repeat the same "
+                "'finding' and 'path_pattern' with different reasons."
+            )
         deduped[key] = suppression
     return list(deduped.values())
 
@@ -2434,11 +2477,89 @@ def _path_matches_any(relative_path: str, patterns: list[str]) -> bool:
 def _path_matches_pattern(relative_path: str, pattern: str) -> bool:
     normalized_path = relative_path.replace("\\", "/").casefold()
     normalized_pattern = pattern.replace("\\", "/").casefold()
-    return (
-        fnmatch.fnmatch(normalized_path, normalized_pattern)
-        or normalized_path == normalized_pattern
-        or normalized_path.startswith(f"{normalized_pattern}/")
-    )
+    if not any(char in normalized_pattern for char in "*?["):
+        return (
+            normalized_path == normalized_pattern
+            or normalized_path.startswith(f"{normalized_pattern}/")
+        )
+    return re.fullmatch(_path_pattern_to_regex(normalized_pattern), normalized_path) is not None
+
+
+def _path_pattern_to_regex(pattern: str) -> str:
+    regex_parts: list[str] = ["^"]
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "?":
+            regex_parts.append("[^/]")
+            index += 1
+            continue
+        if char == "[":
+            closing_index = _path_pattern_class_end(pattern, index + 1)
+            if closing_index is None:
+                regex_parts.append(re.escape(char))
+                index += 1
+                continue
+            regex_parts.append(
+                _path_pattern_class_to_regex(pattern[index + 1 : closing_index])
+            )
+            index = closing_index + 1
+            continue
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    regex_parts.append("(?:[^/]+/)*")
+                    index += 1
+                else:
+                    regex_parts.append(".*")
+                continue
+            regex_parts.append("[^/]*")
+            index += 1
+            continue
+        regex_parts.append(re.escape(char))
+        index += 1
+
+    regex_parts.append("$")
+    return "".join(regex_parts)
+
+
+def _path_pattern_class_end(pattern: str, start_index: int) -> int | None:
+    index = start_index
+    if index < len(pattern) and pattern[index] == "!":
+        index += 1
+    if index < len(pattern) and pattern[index] == "]":
+        index += 1
+    while index < len(pattern):
+        if pattern[index] == "]":
+            return index
+        index += 1
+    return None
+
+
+def _path_pattern_class_to_regex(class_body: str) -> str:
+    if not class_body:
+        return re.escape("[]")
+
+    negated = False
+    if class_body[0] == "!":
+        negated = True
+        class_body = class_body[1:]
+
+    escaped_parts: list[str] = []
+    for char in class_body:
+        if char == "/":
+            continue
+        if char in "\\^-[]":
+            escaped_parts.append("\\" + char)
+        else:
+            escaped_parts.append(char)
+
+    if not escaped_parts:
+        return "[^/]" if negated else re.escape("[]")
+
+    prefix = "[^/" if negated else "["
+    return prefix + "".join(escaped_parts) + "]"
 
 
 def _paths_overlap(path_a: str, path_b: str) -> bool:

@@ -38,6 +38,7 @@ Main responsibilities:
 - surface unreadable files or directories through the skipped-path report area
   instead of silently acting as if the scan was complete
 - load and validate one root `repo-cleanser.toml` file when present
+- reject symlinked root config so external files cannot silently steer a scan
 - read text-like files safely
 - classify files into governance categories
 - detect duplicate docs, unclear authority, temporary/stale artifacts, partial
@@ -75,6 +76,10 @@ The wording contract stays conservative:
 The CLI also enforces a non-destructive output contract: reports cannot
 overwrite existing files and cannot be written inside the scanned repository.
 
+For machine-readable output, `RepoReport` now treats skipped locations as
+generic paths. JSON emits canonical `skipped_paths` and keeps
+`skipped_directories` as a backward-compatible alias.
+
 ## Heuristic Strategy
 
 Repo Cleanser is intentionally conservative:
@@ -107,8 +112,14 @@ declare:
 Those settings can reduce expected noise, but they do not silently turn risky
 areas into `safe` ones. Suppressed findings remain visible in the report.
 Config path patterns must stay inside the repository path space. Mirrored-doc
-source and publish roots must be distinct non-overlapping paths, and advisory
-suppression kinds must be explicit non-empty strings.
+source and publish roots must be distinct non-overlapping paths, both within a
+single entry and across the full config, and advisory suppression kinds must be
+explicit non-empty strings. The root config file itself must be a regular file
+inside the repository boundary. Suppression targets must also be unique per
+finding and path pattern so config intent is not order-dependent. Suppression
+finding ids must match the supported analyzer finding kinds. Path-pattern glob
+matching is path-aware: `*`, `?`, and character classes stay within one path
+segment, and `**` is required for recursive matching.
 
 Current module-boundary analysis is intentionally generic. It looks for
 module-like folders, local entrypoints, bootstrap or registry references,

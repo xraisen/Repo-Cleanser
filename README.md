@@ -179,6 +179,7 @@ review; it does not certify isolation, deletion safety, or impact scope.
 
 Repo Cleanser loads one optional root config file named `repo-cleanser.toml`.
 If it is absent, the analyzer keeps its default behavior.
+The config file must be a real file at the repository root, not a symlink.
 
 ### Using a Config File
 
@@ -228,16 +229,24 @@ reason = "Intentional local scratch note."
 Config rules:
 
 - `ignored_paths` and `generated_paths` are repo-relative path patterns
+- `repo-cleanser.toml` must be a regular file at the repo root, not a symlink
 - config path patterns must stay inside the repository path space
+- single `*` patterns are path-aware and do not cross directory separators;
+  use `**` when you intentionally want recursive matching
+- `?` and character classes like `[ab]` also stay within a single path segment
 - ignored paths are skipped during scanning
 - generated paths reduce expected noise from build or publish output, but do
   not suppress unrelated structural findings
 - `mirrored_docs` declares expected source-to-publish doc mirrors so publish
   targets do not generate duplicate-noise on their own
-- mirrored doc roots must be distinct non-overlapping paths
+- mirrored doc roots must be distinct non-overlapping paths across the full
+  config
 - `advisory_suppressions` silence selected advisory findings, but they remain
   visible in the report under `Suppressed findings`
 - `advisory_suppressions.finding` must be explicit and non-empty
+- `advisory_suppressions.finding` must use a supported finding id such as
+  `duplicate-docs` or `orphaned-artifacts`
+- suppression targets must be unique per finding and path pattern
 - prefer `mirrored_docs` for expected publish copies instead of using a broad
   suppression for grouped duplicate-doc findings
 - config can reduce expected noise, but it does not mark any path as safe
@@ -287,6 +296,9 @@ Repo Cleanser:
   rather than being silently ignored
 - the tool does not prove a file is unused, detachable, or safe to remove
 - the tool does not claim a module is safe to validate alone
+
+JSON reports now expose canonical `skipped_paths`. The older
+`skipped_directories` key remains as a compatibility alias.
 
 ## Canonical Docs
 

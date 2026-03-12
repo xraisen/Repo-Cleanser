@@ -468,6 +468,139 @@ def test_advisory_suppression_can_target_single_subject_finding_with_context_pat
     )
 
 
+def test_single_star_suppression_pattern_does_not_cross_directory_boundaries(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "notes/*.md"\n'
+        'reason = "Suppress direct child notes only."\n',
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "notes" / "scratch.md", "Temporary cleanup notes.\n")
+    write_file(
+        tmp_path / "notes" / "nested" / "scratch.md",
+        "Temporary cleanup notes.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert any(
+        finding.kind == "orphaned-artifacts" and "notes/nested/scratch.md" in finding.paths
+        for finding in report.findings
+    )
+    assert not any(
+        finding.kind == "orphaned-artifacts" and "notes/scratch.md" in finding.paths
+        for finding in report.findings
+    )
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/scratch.md" in finding.paths
+        and "Suppress direct child notes only." in finding.reason
+        for finding in report.suppressed_findings
+    )
+
+
+def test_double_star_suppression_pattern_can_match_nested_paths(tmp_path: Path) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "notes/**/*.md"\n'
+        'reason = "Suppress nested notes recursively."\n',
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "notes" / "scratch.md", "Temporary cleanup notes.\n")
+    write_file(
+        tmp_path / "notes" / "nested" / "scratch.md",
+        "Temporary cleanup notes.\n",
+    )
+    write_file(
+        tmp_path / "notes" / "nested" / "deeper" / "scratch.md",
+        "Temporary cleanup notes.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "orphaned-artifacts" for finding in report.findings)
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/scratch.md" in finding.paths
+        and "Suppress nested notes recursively." in finding.reason
+        for finding in report.suppressed_findings
+    )
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/nested/scratch.md" in finding.paths
+        and "Suppress nested notes recursively." in finding.reason
+        for finding in report.suppressed_findings
+    )
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/nested/deeper/scratch.md" in finding.paths
+        and "Suppress nested notes recursively." in finding.reason
+        for finding in report.suppressed_findings
+    )
+
+
+def test_question_mark_suppression_pattern_matches_single_path_character(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "notes/scratch-?.md"\n'
+        'reason = "Suppress one-character note variants."\n',
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "notes" / "scratch-a.md", "Temporary cleanup notes.\n")
+    write_file(tmp_path / "notes" / "scratch-ab.md", "Temporary cleanup notes.\n")
+
+    report = analyze_repository(tmp_path)
+
+    assert any(
+        finding.kind == "orphaned-artifacts" and "notes/scratch-ab.md" in finding.paths
+        for finding in report.findings
+    )
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/scratch-a.md" in finding.paths
+        and "Suppress one-character note variants." in finding.reason
+        for finding in report.suppressed_findings
+    )
+
+
+def test_character_class_suppression_pattern_matches_single_segment_character(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "notes/scratch-[ab].md"\n'
+        'reason = "Suppress selected note variants."\n',
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "notes" / "scratch-a.md", "Temporary cleanup notes.\n")
+    write_file(tmp_path / "notes" / "scratch-c.md", "Temporary cleanup notes.\n")
+
+    report = analyze_repository(tmp_path)
+
+    assert any(
+        finding.kind == "orphaned-artifacts" and "notes/scratch-c.md" in finding.paths
+        for finding in report.findings
+    )
+    assert any(
+        finding.kind == "orphaned-artifacts"
+        and "notes/scratch-a.md" in finding.paths
+        and "Suppress selected note variants." in finding.reason
+        for finding in report.suppressed_findings
+    )
+
+
 def test_documentation_mentions_do_not_create_safe_detach_risk(tmp_path: Path) -> None:
     write_file(tmp_path / "README.md", "# Repo\n")
     write_file(
@@ -683,6 +816,34 @@ def test_analyzer_skips_symlinked_files_to_stay_inside_repo_boundary(tmp_path: P
     assert "linked-secret.md" in report.skipped_directories
 
 
+def test_repo_config_rejects_symlinked_root_config(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    external_config = tmp_path.parent / "outside-config.toml"
+    external_config.write_text('ignored_paths = ["docs"]\n', encoding="utf-8")
+    config_link = tmp_path / "repo-cleanser.toml"
+
+    try:
+        os.symlink(external_config, config_link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable in test environment: {exc}")
+
+    with pytest.raises(ValueError, match="must be a regular file at the repository root"):
+        analyze_repository(tmp_path)
+
+
+def test_repo_config_rejects_broken_symlinked_root_config(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    config_link = tmp_path / "repo-cleanser.toml"
+
+    try:
+        os.symlink(tmp_path.parent / "missing-config.toml", config_link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable in test environment: {exc}")
+
+    with pytest.raises(ValueError, match="must be a regular file at the repository root"):
+        analyze_repository(tmp_path)
+
+
 def test_analyzer_skips_symlinked_directories_to_stay_inside_repo_boundary(
     tmp_path: Path,
 ) -> None:
@@ -780,6 +941,48 @@ def test_repo_config_rejects_blank_suppression_finding(tmp_path: Path) -> None:
         raise AssertionError("Expected blank suppression finding to be rejected.")
 
 
+def test_repo_config_rejects_unknown_suppression_finding(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "duplicate_docs"\n'
+        'path_pattern = "scratch-notes.md"\n'
+        'reason = "Intentional local scratch note."\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "supported finding id" in str(exc)
+    else:
+        raise AssertionError("Expected unknown suppression finding to be rejected.")
+
+
+def test_repo_config_rejects_duplicate_suppression_target_with_different_reason(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "scratch-notes.md"\n'
+        'reason = "Intentional scratch note."\n\n'
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "scratch-notes.md"\n'
+        'reason = "Conflicting explanation."\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "different reasons" in str(exc)
+    else:
+        raise AssertionError("Expected duplicate suppression target to be rejected.")
+
+
 def test_repo_config_rejects_overlapping_mirror_paths(tmp_path: Path) -> None:
     write_file(tmp_path / "README.md", "# Repo\n")
     write_file(
@@ -795,6 +998,26 @@ def test_repo_config_rejects_overlapping_mirror_paths(tmp_path: Path) -> None:
         assert "distinct non-overlapping" in str(exc)
     else:
         raise AssertionError("Expected overlapping mirrored-doc roots to be rejected.")
+
+
+def test_repo_config_rejects_mirror_path_overlap_across_entries(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[mirrored_docs]]\n"
+        'source = "documentation"\n'
+        'publish = "public/docs"\n\n'
+        "[[mirrored_docs]]\n"
+        'source = "documentation/api"\n'
+        'publish = "public/api"\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "distinct non-overlapping" in str(exc)
+    else:
+        raise AssertionError("Expected overlapping mirrored-doc entries to be rejected.")
 
 
 def test_string_literal_path_does_not_create_safe_detach_risk(tmp_path: Path) -> None:
