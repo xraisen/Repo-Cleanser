@@ -55,6 +55,17 @@ Out of scope for v1:
 
 ## Quick Start
 
+Fastest path:
+
+```bash
+git clone https://github.com/xraisen/Repo-Cleanser.git
+cd Repo-Cleanser
+python -m uv run repo-cleanser scan .
+```
+
+That command scans the current repository and prints a structural advisory
+report to the terminal.
+
 This project uses `uv` as the package manager.
 
 Install dependencies:
@@ -87,6 +98,23 @@ Show supporting files in the highlights section:
 uv run repo-cleanser scan D:\path\to\repo --include-supporting
 ```
 
+## Example: Scanning a Repository
+
+To scan a different repository, point Repo Cleanser at that path:
+
+```bash
+repo-cleanser scan /path/to/project
+```
+
+Repo Cleanser analyzes:
+
+- documentation drift
+- module boundaries
+- shared/core coupling pressure
+- safe-detach risks
+- broad validation triggers
+- possible narrow validation candidates
+
 ## Report Layers
 
 Repo Cleanser currently reports across four practical layers:
@@ -99,10 +127,37 @@ Repo Cleanser currently reports across four practical layers:
 The tool intentionally keeps those layers separate. A repo can look clean in one
 layer and weak in another.
 
+## Example Output
+
+Simplified example:
+
+```text
+Structural strengths
+- 2 module-like areas show local tests or validation files (`src/features/billing`, `src/features/orders`)
+
+Shared/Core coupling risks
+- 3 module-like areas (`src/features/billing`, `src/features/orders`, `src/features/inventory`) appear to reference shared/core code directly
+
+Broad validation triggers
+- shared/core hubs referenced from `src/features/billing`, `src/features/orders` may widen validation beyond a single module-like folder
+
+Possible narrow validation candidates
+- src/features/billing (feature)
+  Signals raising readiness: Entrypoints detected: `src/features/billing/index.ts`; Registration or bootstrap references detected from `src/app/router.ts`; Local checks detected: `src/features/billing/billing.test.ts`
+  Still advisory because: Heuristic only. Manual review recommended before treating this area (`src/features/billing`) as a narrow validation candidate; No actual changed-file or dependency impact analysis is being performed
+```
+
+The report is heuristic and advisory only. It highlights what deserves manual
+review; it does not certify isolation, deletion safety, or impact scope.
+
 ## Canonical Config
 
 Repo Cleanser loads one optional root config file named `repo-cleanser.toml`.
 If it is absent, the analyzer keeps its default behavior.
+
+### Using a Config File
+
+Create `repo-cleanser.toml` at the root of the repository you want to scan.
 
 Example:
 
@@ -123,10 +178,12 @@ reason = "Intentional local scratch note."
 Config rules:
 
 - `ignored_paths` and `generated_paths` are repo-relative path patterns
+- ignored paths are skipped during scanning
+- generated paths reduce expected noise from build or publish output
 - `mirrored_docs` declares expected source-to-publish doc mirrors so publish
-  copies do not generate duplicate-noise on their own
-- `advisory_suppressions` remain visible in the report under
-  `Suppressed findings`
+  targets do not generate duplicate-noise on their own
+- `advisory_suppressions` silence selected advisory findings, but they remain
+  visible in the report under `Suppressed findings`
 - config can reduce expected noise, but it does not mark any path as safe
 
 ## Report Categories
@@ -140,6 +197,23 @@ Config rules:
 - `generated`: cache, build, or generated output signals
 - `unclear-authority`: files that appear to claim governance authority outside
   the canonical location
+
+## Interpreting the Results
+
+- Structural strengths: good modular signals such as entrypoints, local tests,
+  or explicit registration patterns
+- Shared/Core coupling risks: areas that widen validation scope because many
+  modules lean on shared or central internals
+- Broad validation triggers: likely reasons broader or full-repo validation is
+  still needed
+- Narrow validation candidates: areas that might support smaller validation
+  scope later, but only after manual review
+
+Repo Cleanser:
+
+- does not delete code
+- does not rewrite code
+- does not guarantee safe module isolation
 
 ## Safety Model
 
@@ -161,4 +235,18 @@ Repo Cleanser uses one canonical doc chain:
 
 ## Validation
 
-The canonical validation flow lives in [docs/validation.md](docs/validation.md).
+### Running Validation
+
+To validate the Repo Cleanser project itself:
+
+```bash
+python scripts/validate.py
+```
+
+That runs:
+
+- lint
+- typecheck
+- tests
+
+The fuller validation reference still lives in [docs/validation.md](docs/validation.md).
