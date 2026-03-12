@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from repo_cleanser.analyzer import analyze_repository
 from repo_cleanser.models import FileCategory
@@ -661,6 +664,85 @@ def test_repo_config_rejects_drive_relative_patterns(tmp_path: Path) -> None:
         assert "repo-relative paths" in str(exc)
     else:
         raise AssertionError("Expected drive-relative config path to be rejected.")
+
+
+def test_analyzer_skips_symlinked_files_to_stay_inside_repo_boundary(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    outside_file = tmp_path.parent / "outside-secret.md"
+    outside_file.write_text("outside data\n", encoding="utf-8")
+    symlink_path = tmp_path / "linked-secret.md"
+
+    try:
+        os.symlink(outside_file, symlink_path)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable in test environment: {exc}")
+
+    report = analyze_repository(tmp_path)
+
+    assert "linked-secret.md" not in {assessment.path for assessment in report.assessments}
+    assert "linked-secret.md" in report.skipped_directories
+
+
+def test_analyzer_skips_symlinked_directories_to_stay_inside_repo_boundary(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    outside_dir = tmp_path.parent / "outside-linked-dir"
+    outside_dir.mkdir(exist_ok=True)
+    write_file(outside_dir / "secret.md", "outside data\n")
+    symlink_dir = tmp_path / "linked-dir"
+
+    try:
+        os.symlink(outside_dir, symlink_dir, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable in test environment: {exc}")
+
+    report = analyze_repository(tmp_path)
+
+    assert "linked-dir" in report.skipped_directories
+    assert not any(assessment.path.startswith("linked-dir/") for assessment in report.assessments)
+
+
+def test_analyzer_records_unreadable_walk_paths_in_skipped_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+
+    def fake_walk(root: Path, onerror=None):  # type: ignore[no-untyped-def]
+        if onerror is not None:
+            error = OSError("Access denied")
+            error.filename = str(Path(root) / "blocked-dir")
+            onerror(error)
+        yield str(root), [], ["README.md"]
+
+    monkeypatch.setattr("repo_cleanser.analyzer.os.walk", fake_walk)
+
+    report = analyze_repository(tmp_path)
+
+    assert "blocked-dir" in report.skipped_directories
+
+
+def test_analyzer_records_stat_failures_in_skipped_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    blocked_file = tmp_path / "blocked.md"
+    write_file(blocked_file, "blocked\n")
+    original_stat = Path.stat
+
+    def fake_stat(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if self == blocked_file:
+            raise OSError("Access denied")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    report = analyze_repository(tmp_path)
+
+    assert "blocked.md" in report.skipped_directories
+    assert "blocked.md" not in {assessment.path for assessment in report.assessments}
 
 
 def test_plain_variable_name_does_not_count_as_module_registration(tmp_path: Path) -> None:

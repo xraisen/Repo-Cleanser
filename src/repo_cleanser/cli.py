@@ -51,7 +51,6 @@ def scan(
         typer.Option(
             "--output",
             "-o",
-            resolve_path=True,
             help="Write the report to a file instead of stdout.",
         ),
     ] = None,
@@ -66,8 +65,25 @@ def scan(
     try:
         report = analyze_repository(repo_path)
         rendered = render_report(report, format=format, include_supporting=include_supporting)
+        repo_root = repo_path.resolve()
 
         if output is not None:
+            requested_output = output
+            if _is_within_path(requested_output, repo_root):
+                raise ValueError(
+                    "Refusing to write the report inside the scanned repository. "
+                    "Choose an output path outside the target repo."
+                )
+            output = output.resolve()
+            if _is_within_path(output, repo_root):
+                raise ValueError(
+                    "Refusing to write the report inside the scanned repository. "
+                    "Choose an output path outside the target repo."
+                )
+            if output.exists():
+                raise ValueError(
+                    "Refusing to overwrite an existing output file. Choose a new report path."
+                )
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(rendered, encoding="utf-8")
             typer.echo(f"Wrote {format.value} report to {_safe_cli_text(str(output))}")
@@ -87,6 +103,14 @@ def scan(
 
 def main() -> None:
     app()
+
+
+def _is_within_path(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _safe_cli_text(value: str) -> str:

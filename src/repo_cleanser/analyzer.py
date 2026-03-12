@@ -405,14 +405,28 @@ def _scan_files(
 ) -> tuple[list[FileRecord], list[str]]:
     records: list[FileRecord] = []
     skipped_directories: list[str] = []
+    root_resolved = root.resolve()
 
-    for dirpath, dirnames, filenames in os.walk(root):
+    def on_walk_error(exc: OSError) -> None:
+        if exc.filename is None:
+            return
+        skipped_path = _relative_or_display_path(Path(exc.filename), root_resolved)
+        skipped_directories.append(skipped_path)
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
         current_dir = Path(dirpath)
         relative_dir = current_dir.relative_to(root)
         kept_dirnames: list[str] = []
 
         for dirname in dirnames:
+            directory_path = current_dir / dirname
             candidate_dir = str((relative_dir / dirname).as_posix())
+            if _path_is_symlink(directory_path) or not _path_stays_within_root(
+                directory_path,
+                root_resolved,
+            ):
+                skipped_directories.append(candidate_dir if candidate_dir != "." else dirname)
+                continue
             if _path_matches_any(candidate_dir, config_summary.ignored_paths):
                 skipped_directories.append(candidate_dir if candidate_dir != "." else dirname)
                 continue
@@ -429,12 +443,19 @@ def _scan_files(
 
         for filename in filenames:
             absolute_path = current_dir / filename
+            relative_path = absolute_path.relative_to(root).as_posix()
+            if _path_is_symlink(absolute_path) or not _path_stays_within_root(
+                absolute_path,
+                root_resolved,
+            ):
+                skipped_directories.append(relative_path)
+                continue
             try:
                 stat = absolute_path.stat()
             except OSError:
+                skipped_directories.append(relative_path)
                 continue
 
-            relative_path = absolute_path.relative_to(root).as_posix()
             if _path_matches_any(relative_path, config_summary.ignored_paths):
                 continue
             if _path_matches_any(relative_path, config_summary.generated_paths):
@@ -450,7 +471,7 @@ def _scan_files(
             )
 
     records.sort(key=lambda record: record.lowered_path)
-    skipped_directories.sort()
+    skipped_directories = sorted(set(skipped_directories))
     return records, skipped_directories
 
 
@@ -2428,6 +2449,28 @@ def _paths_overlap(path_a: str, path_b: str) -> bool:
         or normalized_a.startswith(f"{normalized_b}/")
         or normalized_b.startswith(f"{normalized_a}/")
     )
+
+
+def _path_stays_within_root(path: Path, root_resolved: Path) -> bool:
+    try:
+        path.resolve().relative_to(root_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _path_is_symlink(path: Path) -> bool:
+    try:
+        return path.is_symlink()
+    except OSError:
+        return False
+
+
+def _relative_or_display_path(path: Path, root_resolved: Path) -> str:
+    try:
+        return path.resolve().relative_to(root_resolved).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return path.name or str(path)
 
 
 def _apply_advisory_suppressions(

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from repo_cleanser.cli import app
@@ -74,7 +76,7 @@ def test_scan_command_writes_json_report(tmp_path: Path) -> None:
         tmp_path / "src" / "app" / "router.ts",
         "import * as billing from '../features/billing';\n",
     )
-    output_path = tmp_path / "report.json"
+    output_path = tmp_path.parent / f"{tmp_path.name}-report.json"
 
     result = runner.invoke(
         app,
@@ -123,7 +125,7 @@ def test_scan_command_reports_invalid_config_as_controlled_error(tmp_path: Path)
     assert "Unable to decode 'repo-cleanser.toml' as UTF-8" in result.output
 
 
-def test_scan_command_reports_output_write_error_without_traceback(tmp_path: Path) -> None:
+def test_scan_command_refuses_existing_output_path_inside_scanned_repo(tmp_path: Path) -> None:
     write_file(tmp_path / "README.md", "# Repo\n")
     output_dir = tmp_path / "report-output"
     output_dir.mkdir()
@@ -131,8 +133,51 @@ def test_scan_command_reports_output_write_error_without_traceback(tmp_path: Pat
     result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_dir)])
 
     assert result.exit_code == 1
-    assert "Repo Cleanser error: unable to write report:" in result.output
-    assert "Permission denied" in result.output or "Is a directory" in result.output
+    assert "Refusing to write the report inside the scanned repository" in result.output
+
+
+def test_scan_command_refuses_to_overwrite_existing_output_file(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    output_path = tmp_path.parent / "existing-report.txt"
+    output_path.write_text("keep me\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    assert result.exit_code == 1
+    assert "Refusing to overwrite an existing output file" in result.output
+    assert output_path.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_scan_command_refuses_to_write_report_inside_scanned_repo(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    output_path = tmp_path / "report.txt"
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    assert result.exit_code == 1
+    assert "Refusing to write the report inside the scanned repository" in result.output
+    assert not output_path.exists()
+
+
+def test_scan_command_refuses_output_through_symlinked_repo_subdirectory(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    outside_dir = tmp_path.parent / "outside-output"
+    outside_dir.mkdir(exist_ok=True)
+    symlink_dir = tmp_path / "report-link"
+
+    try:
+        os.symlink(outside_dir, symlink_dir, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable in test environment: {exc}")
+
+    output_path = symlink_dir / "report.txt"
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    assert result.exit_code == 1
+    assert "Refusing to write the report inside the scanned repository" in result.output
+    assert not (outside_dir / "report.txt").exists()
 
 
 def test_text_report_escapes_control_and_escape_characters() -> None:

@@ -73,6 +73,9 @@ not quietly reappear:
 - unsafe control or escape characters leaking into terminal report output
 - config paths escaping the repository path space
 - mirrored-doc roots overlapping or suppression finding kinds being blank
+- report output overwriting existing files or writing into the scanned repo
+- symlinked paths leaking outside the intended repository boundary
+- unreadable walked files or directories being skipped silently
 
 ## Fallback Behavior
 

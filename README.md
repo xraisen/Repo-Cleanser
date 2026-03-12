@@ -105,6 +105,10 @@ Write a JSON report:
 uv run repo-cleanser scan D:\path\to\repo --format json --output .\report.json
 ```
 
+Choose an output path outside the scanned repository. Repo Cleanser refuses to
+overwrite existing files and refuses to write reports into the target repo so
+the scan stays non-destructive.
+
 Show supporting files in the highlights section:
 
 ```powershell
@@ -275,6 +279,12 @@ Repo Cleanser:
 - `likely orphaned` always means heuristic only
 - suppressions are traceable, not silent
 - Repo Cleanser never modifies the scanned repository in v1
+- report output must be written outside the scanned repository
+- existing files are never overwritten by report output
+- symlinked files and directories are skipped so scans stay inside the target
+  repository boundary
+- unreadable files or directories are surfaced through `Skipped scan paths`
+  rather than being silently ignored
 - the tool does not prove a file is unused, detachable, or safe to remove
 - the tool does not claim a module is safe to validate alone
 

@@ -28,7 +28,7 @@ def render_text_report(report: RepoReport, *, include_supporting: bool = False) 
         "Repo Cleanser Report",
         f"Root: {report.root}",
         f"Scanned files: {report.scanned_files}",
-        f"Skipped scan directories: {', '.join(report.skipped_directories) or 'none'}",
+        f"Skipped scan paths: {', '.join(report.skipped_directories) or 'none'}",
         "",
         "Config:",
     ]

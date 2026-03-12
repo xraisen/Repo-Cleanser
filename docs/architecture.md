@@ -12,7 +12,7 @@ At a high level, the current flow is:
 
 1. resolve the target repository
 2. load one explicit root `repo-cleanser.toml` file when present
-3. walk the repository while pruning ignored or generated areas
+3. walk the repository while pruning ignored, generated, symlinked, or unreadable areas
 4. analyze governance drift, cleanup-risk signals, and architecture heuristics
 5. apply transparent advisory suppressions
 6. render one text or JSON report
@@ -33,6 +33,10 @@ Main responsibilities:
 
 - walk the repository while pruning obviously generated or explicitly ignored
   directories
+- skip symlinked files and directories so scanning stays inside the target
+  repository boundary
+- surface unreadable files or directories through the skipped-path report area
+  instead of silently acting as if the scan was complete
 - load and validate one root `repo-cleanser.toml` file when present
 - read text-like files safely
 - classify files into governance categories
@@ -66,6 +70,10 @@ The wording contract stays conservative:
 - orphan wording must remain `likely orphaned` or equivalent
 - suppressions must remain visible and attributable
 - recommendations must require manual review before destructive follow-up
+- text output must escape unsafe control and formatting characters
+
+The CLI also enforces a non-destructive output contract: reports cannot
+overwrite existing files and cannot be written inside the scanned repository.
 
 ## Heuristic Strategy
 
