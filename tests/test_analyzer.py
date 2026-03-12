@@ -403,3 +403,32 @@ def test_analyzer_applies_repo_config_for_ignores_mirrors_generated_paths_and_su
         and "Known non-canonical source-doc location." in finding.reason
         for finding in report.suppressed_findings
     )
+
+
+def test_advisory_suppression_does_not_hide_grouped_finding_with_unmatched_paths(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "duplicate-docs"\n'
+        'path_pattern = "public/docs/*"\n'
+        'reason = "Publish mirror path only."\n',
+    )
+    write_file(tmp_path / "docs" / "architecture.md", "Same content.\n")
+    write_file(tmp_path / "public" / "docs" / "architecture.md", "Same content.\n")
+    write_file(tmp_path / "notes" / "architecture-copy.md", "Same content.\n")
+
+    report = analyze_repository(tmp_path)
+
+    duplicate_findings = [
+        finding for finding in report.findings if finding.kind == "duplicate-docs"
+    ]
+
+    assert duplicate_findings
+    assert any("notes/architecture-copy.md" in finding.paths for finding in duplicate_findings)
+    assert not any(
+        finding.kind == "duplicate-docs"
+        and "Publish mirror path only." in finding.reason
+        for finding in report.suppressed_findings
+    )

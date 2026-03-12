@@ -216,9 +216,9 @@ source = "documentation"
 publish = "public/docs"
 
 [[advisory_suppressions]]
-finding = "duplicate-docs"
-path_pattern = "public/docs/*"
-reason = "Publish mirror of documentation."
+finding = "orphaned-artifacts"
+path_pattern = "scratch-notes.md"
+reason = "Intentional local scratch note."
 ```
 
 Config rules:
@@ -231,6 +231,8 @@ Config rules:
   targets do not generate duplicate-noise on their own
 - `advisory_suppressions` silence selected advisory findings, but they remain
   visible in the report under `Suppressed findings`
+- prefer `mirrored_docs` for expected publish copies instead of using a broad
+  suppression for grouped duplicate-doc findings
 - config can reduce expected noise, but it does not mark any path as safe
 
 ## Report Categories

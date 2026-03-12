@@ -2342,7 +2342,7 @@ def _match_advisory_suppression(
             continue
         if not finding.paths:
             continue
-        if any(_path_matches_pattern(path, suppression.path_pattern) for path in finding.paths):
+        if all(_path_matches_pattern(path, suppression.path_pattern) for path in finding.paths):
             return suppression
     return None
 
