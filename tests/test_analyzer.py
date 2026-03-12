@@ -57,6 +57,14 @@ def test_analyzer_reports_modularity_strengths_for_clean_feature_modules(
     assert not report.validation_readiness.broad_validation_triggers
     assert not report.validation_readiness.shared_core_coupling_risks
     assert not report.validation_readiness.validation_blockers
+    billing_candidate = next(
+        candidate
+        for candidate in report.validation_readiness.narrow_validation_candidates
+        if candidate.path == "src/features/billing"
+    )
+    assert any("index.ts" in reason for reason in billing_candidate.reasons)
+    assert any("router.ts" in reason for reason in billing_candidate.reasons)
+    assert any("billing.test.ts" in reason for reason in billing_candidate.reasons)
     assert all(
         candidate.advisory_notes
         for candidate in report.validation_readiness.narrow_validation_candidates
@@ -170,6 +178,10 @@ def test_feature_folders_do_not_override_shared_core_readiness_blockers(tmp_path
         for trigger in report.validation_readiness.broad_validation_triggers
     )
     assert any(
+        "src/shared" in risk
+        for risk in report.validation_readiness.shared_core_coupling_risks
+    )
+    assert any(
         finding.kind == "shared-core-coupling" for finding in report.findings
     )
 
@@ -243,6 +255,10 @@ def test_analyzer_reports_cross_boundary_and_shared_contract_pressure_as_readine
     assert any(
         "contract-style" in trigger or "module internals" in trigger
         for trigger in report.validation_readiness.broad_validation_triggers
+    )
+    assert any(
+        "src/main.ts" in blocker
+        for blocker in report.validation_readiness.validation_blockers
     )
     assert any(
         finding.kind == "validation-readiness" for finding in report.findings
@@ -331,3 +347,59 @@ def test_analyzer_marks_suspicious_files_as_temporary_and_orphaned(tmp_path: Pat
 
     assert categories["scratch-notes.md"] is FileCategory.TEMPORARY
     assert any(finding.kind == "orphaned-artifacts" for finding in report.findings)
+
+
+def test_analyzer_applies_repo_config_for_ignores_mirrors_generated_paths_and_suppressions(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        'ignored_paths = ["notes"]\n'
+        'generated_paths = ["coverage"]\n\n'
+        "[[mirrored_docs]]\n"
+        'source = "documentation"\n'
+        'publish = "public/docs"\n\n'
+        "[[advisory_suppressions]]\n"
+        'finding = "unclear-authority"\n'
+        'path_pattern = "documentation/*"\n'
+        'reason = "Known non-canonical source-doc location."\n',
+    )
+    write_file(tmp_path / "README.md", "# Sample Repo\n")
+    write_file(
+        tmp_path / "documentation" / "architecture.md",
+        "Canonical architecture content.\n",
+    )
+    write_file(
+        tmp_path / "public" / "docs" / "architecture.md",
+        "Canonical architecture content.\n",
+    )
+    write_file(tmp_path / "scratch-notes.md", "Temporary cleanup notes.\n")
+    write_file(tmp_path / "notes" / "draft.md", "Ignore this folder.\n")
+    write_file(tmp_path / "coverage" / "summary.json", '{"ok": true}\n')
+
+    report = analyze_repository(tmp_path)
+    assessed_paths = {assessment.path for assessment in report.assessments}
+
+    assert report.config_summary.path == "repo-cleanser.toml"
+    assert report.config_summary.ignored_paths == ["notes"]
+    assert report.config_summary.generated_paths == ["coverage"]
+    assert report.skipped_directories == ["coverage", "notes"]
+    assert "notes/draft.md" not in assessed_paths
+    assert "coverage/summary.json" not in assessed_paths
+    assert not any(finding.kind == "duplicate-docs" for finding in report.findings)
+    assert not any(finding.kind == "unclear-authority" for finding in report.findings)
+    assert any(
+        finding.kind == "duplicate-docs"
+        and "Configured mirrored docs" in finding.reason
+        for finding in report.suppressed_findings
+    )
+    assert any(
+        finding.kind == "unclear-authority"
+        and "public/docs/architecture.md" in ",".join(finding.paths)
+        for finding in report.suppressed_findings
+    )
+    assert any(
+        finding.kind == "unclear-authority"
+        and "Known non-canonical source-doc location." in finding.reason
+        for finding in report.suppressed_findings
+    )

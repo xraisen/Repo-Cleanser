@@ -1,17 +1,27 @@
 # AGENTS.md
 
-## Purpose
+## Mission
 
-This repository builds `repo-cleanser`, a non-destructive CLI for repository governance and cleanup analysis.
+This repository builds `repo-cleanser`, a conservative CLI for repository
+governance, cleanup-risk review, module-boundary analysis, and advisory
+validation-readiness reporting.
 
-## Rules
+## Product Guardrails
 
-- Preserve the non-destructive contract. Do not add automatic deletion or rewriting unless the product scope changes explicitly.
-- Prefer updating the canonical docs instead of creating parallel summaries or scratch governance files.
-- Keep the CLI output understandable by a solo developer reviewing a real repository under time pressure.
-- Treat cleanup findings as advisory. A finding should explain why a file is risky and what should be verified before any removal.
+- Preserve the non-destructive contract. Do not add automatic deletion,
+  rewriting, or auto-fix behavior unless the product scope changes explicitly.
+- Keep findings advisory and explainable. The tool should surface risk, not
+  pretend to prove safety.
+- Do not introduce fake confidence through scores, `safe` labels, or silent
+  suppressions.
+- Prefer one explicit root config file, `repo-cleanser.toml`, over scattered
+  or magical configuration behavior.
+- Keep the CLI output understandable for a solo developer reviewing a real repo
+  under time pressure.
 
-## Canonical Docs
+## Documentation Hygiene
+
+Use one canonical doc chain only:
 
 - `README.md`
 - `AGENTS.md`
@@ -19,6 +29,16 @@ This repository builds `repo-cleanser`, a non-destructive CLI for repository gov
 - `docs/validation.md`
 - `docs/project-tree.md`
 
-## Validation
+When behavior changes:
 
-Before finishing changes, run the commands in `docs/validation.md`.
+- update the canonical docs that are now out of date
+- do not create parallel summaries, v2 notes, or scratch governance files
+- keep wording aligned with the actual implementation, not future ambition
+
+## Definition Of Done
+
+Before finishing changes:
+
+- run the commands in `docs/validation.md`
+- confirm docs still match reality
+- keep suppressions and safety language transparent

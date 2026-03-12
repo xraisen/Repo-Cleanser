@@ -1,12 +1,30 @@
 # Repo Cleanser
 
-Repo Cleanser is a non-destructive Python CLI that scans a local repository and
-highlights documentation drift, duplicate or stale files, risky cleanup
-targets, incomplete migration signals, and suspicious cleanup clutter patterns.
+> A conservative CLI for cleaning up repository noise without pretending it can
+> clean up your repo for you.
 
-It does not delete or rewrite project files. It produces a readable governance and cleanup report so a developer can make safe follow-up decisions.
+Repo Cleanser scans a local repository and produces one readable, non-destructive
+report about governance drift, risky cleanup targets, module-boundary quality,
+and advisory validation-readiness signals. It is built for long-lived repos
+where stale docs, half-finished migrations, mirrored files, and AI-generated
+clutter accumulate faster than anyone wants to admit.
 
-## Scope
+## Why It Exists
+
+Real repos rarely fail because one file is obviously broken. They decay because:
+
+- documentation drifts out of authority
+- duplicate files survive after migrations
+- temp and scratch artifacts never leave
+- shared/core code quietly defeats folder-level modularity
+- teams start assuming something is safe to delete or validate in isolation
+  before that has actually been verified
+
+Repo Cleanser is designed to slow that down. It does not auto-delete, auto-fix,
+or auto-certify anything. It gives you a structured report that is useful
+enough to review and safe enough to trust.
+
+## What It Does
 
 Version `0.1.0` supports:
 
@@ -17,27 +35,39 @@ Version `0.1.0` supports:
 - reporting a first heuristic layer for module boundaries, explicit
   registration signals, and possible safe-detach risks
 - reporting an advisory affected-only validation readiness layer that treats
-  shared/core coupling as a major blocker
+  shared/core coupling as a first-class blocker
 - reporting advisory broad validation triggers and possible narrow validation
   candidates without scoring or claiming safety
+- loading one explicit `repo-cleanser.toml` file for ignores, known mirrors,
+  generated paths, and traceable advisory suppressions
 - generating a text or JSON report
+
+## What It Refuses To Do
 
 Out of scope for v1:
 
 - automatic deletion or cleanup
 - code rewriting
+- dependency-graph certainty claims
+- changed-file impact execution
 - cloud or multi-user features
 - dashboard or IDE integration
 
-## Install
+## Quick Start
 
 This project uses `uv` as the package manager.
+
+Install dependencies:
 
 ```powershell
 uv sync --group dev
 ```
 
-## Usage
+If `uv` is installed but not on `PATH`, use:
+
+```powershell
+python -m uv sync --group dev
+```
 
 Run a text report:
 
@@ -45,7 +75,7 @@ Run a text report:
 uv run repo-cleanser scan D:\path\to\repo
 ```
 
-Write a JSON report to disk:
+Write a JSON report:
 
 ```powershell
 uv run repo-cleanser scan D:\path\to\repo --format json --output .\report.json
@@ -57,27 +87,71 @@ Show supporting files in the highlights section:
 uv run repo-cleanser scan D:\path\to\repo --include-supporting
 ```
 
+## Report Layers
+
+Repo Cleanser currently reports across four practical layers:
+
+1. Governance and cleanup risk
+2. Module-boundary quality
+3. Safe-detach risk signals
+4. Advisory readiness for narrower affected-scope validation
+
+The tool intentionally keeps those layers separate. A repo can look clean in one
+layer and weak in another.
+
+## Canonical Config
+
+Repo Cleanser loads one optional root config file named `repo-cleanser.toml`.
+If it is absent, the analyzer keeps its default behavior.
+
+Example:
+
+```toml
+ignored_paths = ["notes", "archive/tmp"]
+generated_paths = ["coverage", "storybook-static"]
+
+[[mirrored_docs]]
+source = "documentation"
+publish = "public/docs"
+
+[[advisory_suppressions]]
+finding = "orphaned-artifacts"
+path_pattern = "scratch-notes.md"
+reason = "Intentional local scratch note."
+```
+
+Config rules:
+
+- `ignored_paths` and `generated_paths` are repo-relative path patterns
+- `mirrored_docs` declares expected source-to-publish doc mirrors so publish
+  copies do not generate duplicate-noise on their own
+- `advisory_suppressions` remain visible in the report under
+  `Suppressed findings`
+- config can reduce expected noise, but it does not mark any path as safe
+
 ## Report Categories
 
 - `canonical`: source-of-truth docs or root governance/config entrypoints
 - `supporting`: normal implementation, tests, scripts, and supporting docs
 - `duplicate`: overlapping files that likely duplicate an existing source
-- `stale`: old, deprecated, copied, or backup-like artifacts
+- `stale`: old, deprecated, copied, backup-like, or migration-leftover artifacts
 - `historical`: intentional archive or history material
 - `temporary`: scratch, draft, temp, or work-in-progress artifacts
 - `generated`: cache, build, or generated output signals
-- `unclear-authority`: files that appear to claim governance authority outside the canonical location
+- `unclear-authority`: files that appear to claim governance authority outside
+  the canonical location
 
-## Safety Notes
+## Safety Model
 
-- `likely orphaned` always means heuristic only. Review manually before
-  deleting, archiving, or renaming anything.
-- Repo Cleanser never modifies the scanned repository in v1.
-- The tool does not prove a file is unused or safe to remove.
+- `likely orphaned` always means heuristic only
+- suppressions are traceable, not silent
+- Repo Cleanser never modifies the scanned repository in v1
+- the tool does not prove a file is unused, detachable, or safe to remove
+- the tool does not claim a module is safe to validate alone
 
-## Canonical Documentation Chain
+## Canonical Docs
 
-Repo Cleanser recommends this governance chain when a repository needs explicit documentation authority:
+Repo Cleanser uses one canonical doc chain:
 
 1. `README.md`
 2. `AGENTS.md`
@@ -87,4 +161,4 @@ Repo Cleanser recommends this governance chain when a repository needs explicit 
 
 ## Validation
 
-The canonical validation commands are documented in [docs/validation.md](docs/validation.md).
+The canonical validation flow lives in [docs/validation.md](docs/validation.md).

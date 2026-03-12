@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from repo_cleanser.models import (
+    ConfiguredMirror,
+    ConfiguredSuppression,
     FileAssessment,
     FileCategory,
     Finding,
     FindingSeverity,
     ModuleBoundarySummary,
     ModuleCandidate,
+    RepoConfigSummary,
     RepoReport,
+    SuppressedFinding,
     ValidationReadinessSummary,
     ValidationScopeCandidate,
 )
@@ -26,6 +32,7 @@ CANONICAL_DOC_CHAIN: list[str] = [
     "docs/validation.md",
     "docs/project-tree.md",
 ]
+CONFIG_FILE_NAME = "repo-cleanser.toml"
 
 CANONICAL_ROOT_FILES = {
     ".gitignore",
@@ -35,6 +42,7 @@ CANONICAL_ROOT_FILES = {
     "makefile",
     "package.json",
     "pyproject.toml",
+    "repo-cleanser.toml",
     "requirements.txt",
 }
 
@@ -252,32 +260,98 @@ class FileRecord:
         return self.relative_path.lower()
 
 
+def _load_repo_config(root: Path) -> RepoConfigSummary:
+    config_path = root / CONFIG_FILE_NAME
+    if not config_path.exists():
+        return RepoConfigSummary()
+
+    try:
+        raw_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Unable to read '{CONFIG_FILE_NAME}': {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid '{CONFIG_FILE_NAME}': {exc}") from exc
+
+    ignored_paths = _load_config_path_list(
+        raw_config.get("ignored_paths"),
+        field_name="ignored_paths",
+    )
+    generated_paths = _load_config_path_list(
+        raw_config.get("generated_paths"),
+        field_name="generated_paths",
+    )
+    mirrored_docs = _load_mirrored_docs_config(raw_config.get("mirrored_docs"))
+    advisory_suppressions = _load_advisory_suppressions_config(
+        raw_config.get("advisory_suppressions")
+    )
+
+    return RepoConfigSummary(
+        path=CONFIG_FILE_NAME,
+        ignored_paths=ignored_paths,
+        generated_paths=generated_paths,
+        mirrored_docs=mirrored_docs,
+        advisory_suppressions=advisory_suppressions,
+    )
+
+
 def analyze_repository(root: Path) -> RepoReport:
     if not root.exists():
         raise ValueError(f"Repository path does not exist: {root}")
     if not root.is_dir():
         raise ValueError(f"Repository path must be a directory: {root}")
 
-    records, skipped_directories = _scan_files(root)
+    config_summary = _load_repo_config(root)
+    records, skipped_directories = _scan_files(root, config_summary)
     module_boundary, module_findings, module_candidates = _analyze_module_boundaries(records)
     validation_readiness, readiness_findings = _analyze_validation_readiness(
         records,
         module_boundary,
         module_candidates,
     )
-    duplicate_paths, duplicate_findings = _detect_duplicate_docs(records)
-    unclear_paths, unclear_findings = _detect_unclear_authority(records)
+    duplicate_paths, duplicate_findings, mirror_suppressed_duplicates = _detect_duplicate_docs(
+        records,
+        config_summary,
+    )
+    unclear_paths, unclear_findings, mirror_suppressed_unclear = _detect_unclear_authority(
+        records,
+        config_summary,
+    )
+    (
+        duplicate_unclear_findings,
+        suppressed_findings,
+        suppressed_duplicate_paths,
+        suppressed_unclear_paths,
+    ) = _apply_advisory_suppressions(
+        duplicate_findings + unclear_findings,
+        config_summary,
+    )
+    duplicate_paths -= suppressed_duplicate_paths
+    unclear_paths = {
+        path: reasons
+        for path, reasons in unclear_paths.items()
+        if path not in suppressed_unclear_paths
+    }
+
     migration_findings = _detect_partial_migrations(records)
     assessments = _classify_files(records, duplicate_paths, unclear_paths)
     orphan_findings = _detect_orphan_candidates(records, assessments)
-    findings = sorted(
+    active_other_findings, more_suppressed_findings, _, _ = _apply_advisory_suppressions(
         readiness_findings
         + module_findings
-        + duplicate_findings
-        + unclear_findings
         + migration_findings
         + orphan_findings,
+        config_summary,
+    )
+    findings = sorted(
+        duplicate_unclear_findings + active_other_findings,
         key=_finding_sort_key,
+    )
+    all_suppressed_findings = sorted(
+        mirror_suppressed_duplicates
+        + mirror_suppressed_unclear
+        + suppressed_findings
+        + more_suppressed_findings,
+        key=lambda finding: (finding.kind, finding.summary),
     )
     recommended_actions = _build_recommended_actions(findings)
     repository_risks = _build_repository_risks(findings)
@@ -287,16 +361,21 @@ def analyze_repository(root: Path) -> RepoReport:
         scanned_files=len(records),
         skipped_directories=skipped_directories,
         canonical_doc_chain=CANONICAL_DOC_CHAIN.copy(),
+        config_summary=config_summary,
         module_boundary=module_boundary,
         validation_readiness=validation_readiness,
         assessments=assessments,
         findings=findings,
+        suppressed_findings=all_suppressed_findings,
         recommended_actions=recommended_actions,
         repository_risks=repository_risks,
     )
 
 
-def _scan_files(root: Path) -> tuple[list[FileRecord], list[str]]:
+def _scan_files(
+    root: Path,
+    config_summary: RepoConfigSummary,
+) -> tuple[list[FileRecord], list[str]]:
     records: list[FileRecord] = []
     skipped_directories: list[str] = []
 
@@ -306,6 +385,13 @@ def _scan_files(root: Path) -> tuple[list[FileRecord], list[str]]:
         kept_dirnames: list[str] = []
 
         for dirname in dirnames:
+            candidate_dir = str((relative_dir / dirname).as_posix())
+            if _path_matches_any(candidate_dir, config_summary.ignored_paths):
+                skipped_directories.append(candidate_dir if candidate_dir != "." else dirname)
+                continue
+            if _path_matches_any(candidate_dir, config_summary.generated_paths):
+                skipped_directories.append(candidate_dir if candidate_dir != "." else dirname)
+                continue
             if dirname.lower() in GENERATED_DIR_NAMES:
                 skipped = str((relative_dir / dirname).as_posix())
                 skipped_directories.append(skipped if skipped != "." else dirname)
@@ -322,6 +408,10 @@ def _scan_files(root: Path) -> tuple[list[FileRecord], list[str]]:
                 continue
 
             relative_path = absolute_path.relative_to(root).as_posix()
+            if _path_matches_any(relative_path, config_summary.ignored_paths):
+                continue
+            if _path_matches_any(relative_path, config_summary.generated_paths):
+                continue
             text = _read_text_if_supported(absolute_path, stat.st_size)
             records.append(
                 FileRecord(
@@ -774,32 +864,80 @@ def _analyze_validation_readiness(
     validation_blockers: list[str] = []
     manual_review_recommendations: list[str] = []
     findings: list[Finding] = []
+    local_check_examples = _format_path_examples(
+        [candidate.path for candidate in modules_with_local_checks]
+    )
+    manifest_examples = _format_path_examples(
+        [candidate.path for candidate in modules_with_manifests]
+    )
+    isolated_examples = _format_path_examples(advisory_isolated_modules)
+    shared_core_examples = _format_path_examples(shared_core_areas)
+    shared_ref_examples = _format_path_examples(
+        [candidate.path for candidate in modules_with_shared_refs]
+    )
+    contract_examples = _format_path_examples(contract_areas)
+    contract_module_examples = _format_path_examples(
+        [candidate.path for candidate in modules_with_contract_refs]
+    )
+    global_cross_boundary_examples = _format_path_examples(
+        global_cross_boundary_internal_paths
+    )
 
     if len(modules_with_local_checks) >= 2:
+        module_check_count = _counted_phrase(
+            len(modules_with_local_checks),
+            "module-like area",
+            "module-like areas",
+        )
         structural_strengths.append(
-            "Heuristic structural strength: multiple module-like areas contain "
-            "local tests or validation files."
+            "Heuristic structural strength: "
+            f"{module_check_count} show local tests or validation files "
+            f"({local_check_examples}), "
+            "which makes narrower validation boundaries easier to reason about."
         )
     if len(modules_with_manifests) >= 2:
+        manifest_count = _counted_phrase(
+            len(modules_with_manifests),
+            "module-like area",
+            "module-like areas",
+        )
         structural_strengths.append(
-            "Heuristic structural strength: multiple module-like areas contain "
-            "local manifests or package declarations."
+            "Heuristic structural strength: "
+            f"{manifest_count} show local manifests or package declarations "
+            f"({manifest_examples}), "
+            "which gives their boundaries a more explicit shape."
         )
 
     if len(advisory_isolated_modules) >= 2:
-        readiness_strengths.append(
-            "Heuristic readiness strength: multiple module-like areas expose "
-            "entrypoints, have local checks, and show limited shared/core or "
-            "cross-boundary coupling."
+        isolated_count = _counted_phrase(
+            len(advisory_isolated_modules),
+            "module-like area",
+            "module-like areas",
         )
-    if any(
-        candidate.kind == "edge-function"
-        and candidate.path in advisory_isolated_modules
-        for candidate in module_candidates
-    ):
         readiness_strengths.append(
-            "Heuristic readiness strength: some edge-function folders look "
-            "isolated enough for advisory module-scoped validation consideration."
+            "Heuristic readiness strength: "
+            f"{isolated_count} ({isolated_examples}) combine clear entrypoints, "
+            "explicit wiring or isolated layout, local checks, and no detected "
+            "shared/core or cross-boundary internal references."
+        )
+    isolated_edge_functions = [
+        candidate.path
+        for candidate in module_candidates
+        if candidate.kind == "edge-function"
+        and candidate.path in advisory_isolated_modules
+    ]
+    if isolated_edge_functions:
+        isolated_edge_examples = _format_path_examples(isolated_edge_functions)
+        isolated_edge_count = _counted_phrase(
+            len(isolated_edge_functions),
+            "edge-function folder",
+            "edge-function folders",
+        )
+        readiness_strengths.append(
+            "Heuristic readiness strength: "
+            f"{isolated_edge_count} ({isolated_edge_examples}) look structurally closer "
+            "to narrower validation because they combine isolated layout, local "
+            "entrypoints, and low detected coupling."
         )
 
     shared_core_ratio = (
@@ -811,15 +949,21 @@ def _analyze_validation_readiness(
         shared_core_ratio >= 0.25
         or len(shared_core_code_records) >= max(4, len(module_candidates))
     ):
+        shared_core_area_count = _counted_phrase(
+            len(shared_core_areas),
+            "shared/core-style area",
+            "shared/core-style areas",
+        )
         shared_core_coupling_risks.append(
-            "Possible shared/core coupling risk: a substantial portion of the "
-            "codebase sits inside shared/core-style areas, which can reduce "
-            "confidence in smallest-safe affected-scope validation."
+            "Possible shared/core coupling risk: "
+            f"{shared_core_area_count} ({shared_core_examples}) account for about "
+            f"{shared_core_ratio:.0%} of scanned code files, which lowers confidence "
+            "that one-folder validation maps cleanly to real impact."
         )
         validation_blockers.append(
-            "Possible blocker to affected-only validation: shared/core-style "
-            "areas appear concentrated enough that changes there likely still "
-            "need broad manual review and broader validation."
+            "Possible blocker to affected-only validation: concentrated "
+            f"shared/core-style areas ({shared_core_examples}) "
+            "likely widen validation scope and still deserve broad manual review."
         )
         findings.append(
             Finding(
@@ -830,81 +974,98 @@ def _analyze_validation_readiness(
                     else FindingSeverity.MEDIUM
                 ),
                 summary=(
-                    "A substantial portion of the codebase appears to sit in "
-                    "shared/core-style areas."
+                    "Shared/core-style areas "
+                    f"({shared_core_examples}) account for about "
+                    f"{shared_core_ratio:.0%} of scanned code files."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Treat changes "
-                    "in those shared/core areas as broad validation triggers "
-                    "until coupling is better understood."
+                    "in those shared/core areas as likely broad validation "
+                    "triggers until their downstream coupling is better understood."
                 ),
                 paths=shared_core_areas[:6],
             )
         )
         manual_review_recommendations.append(
-            "Review shared/core-style directories first when deciding whether "
-            "affected-only validation is realistic."
+            "Review shared/core-style directories such as "
+            f"{shared_core_examples} first when deciding "
+            "whether narrower validation is realistic."
         )
         if shared_core_areas:
             broad_validation_triggers.append(
                 "Likely broad validation trigger: changes inside shared/core-style "
-                f"areas such as {', '.join(shared_core_areas[:3])} appear likely "
-                "to widen validation scope beyond one module-like area."
+                f"areas ({shared_core_examples}) may widen "
+                "validation scope beyond one module-like area because a large "
+                "share of scanned code sits there."
             )
 
     if len(modules_with_shared_refs) >= max(2, (len(module_candidates) + 1) // 2):
+        shared_ref_count = _counted_phrase(
+            len(modules_with_shared_refs),
+            "module-like area",
+            "module-like areas",
+        )
         shared_core_coupling_risks.append(
-            "Possible shared/core coupling risk: many module-like areas appear "
-            "to reference shared/core code directly."
+            "Possible shared/core coupling risk: "
+            f"{shared_ref_count} ({shared_ref_examples}) "
+            "appear to reference shared/core code directly."
         )
         validation_blockers.append(
-            "Possible blocker to affected-only validation: many modules route "
-            "logic through shared/core areas, so folder boundaries alone are "
-            "not strong evidence of isolation."
+            "Possible blocker to affected-only validation: folder boundaries "
+            "look cleaner than the dependency surface because many module-like "
+            "areas still route logic through shared/core hubs."
         )
         findings.append(
             Finding(
                 kind="shared-core-coupling",
                 severity=FindingSeverity.MEDIUM,
                 summary=(
-                    "Many module-like areas appear to reference shared/core "
-                    "code directly."
+                    f"{shared_ref_count} appear to reference shared/core "
+                    f"code directly ({shared_ref_examples})."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Reduce "
                     "confidence in affected-only validation when many modules "
-                    "depend on shared/core hubs."
+                    "depend on shared/core hubs rather than mostly local boundaries."
                 ),
                 paths=[candidate.path for candidate in modules_with_shared_refs[:6]],
             )
         )
         manual_review_recommendations.append(
             "Inspect whether shared/core areas act as utility hubs or contract "
-            "hubs before trusting module-scoped validation."
+            "hubs before trusting module-scoped validation, especially for "
+            f"{shared_ref_examples}."
         )
         broad_validation_triggers.append(
-            "Likely broad validation trigger: many module-like areas appear "
-            "to route through shared/core hubs, so a change in those hubs may "
-            "require broader validation than a single folder suggests."
+            "Likely broad validation trigger: shared/core hubs referenced from "
+            f"{shared_ref_examples} "
+            "may widen validation beyond a single module-like folder."
         )
 
     if len(modules_with_contract_refs) >= 2:
+        contract_ref_count = _counted_phrase(
+            len(modules_with_contract_refs),
+            "module-like area",
+            "module-like areas",
+        )
         shared_core_coupling_risks.append(
-            "Possible shared/core coupling risk: central types, interfaces, "
-            "schemas, or contract-style areas appear to be touched by multiple modules."
+            "Possible shared/core coupling risk: contract-style areas "
+            f"({contract_examples}) appear to be touched by "
+            f"{contract_ref_count} ({contract_module_examples})."
         )
         validation_blockers.append(
-            "Possible blocker to affected-only validation: shared contracts "
-            "appear central enough that their changes may need broader "
-            "validation than one module at a time."
+            "Possible blocker to affected-only validation: shared contracts, "
+            "types, or schemas appear central enough that their changes may need "
+            "broader validation than one module at a time."
         )
         findings.append(
             Finding(
                 kind="shared-core-coupling",
                 severity=FindingSeverity.MEDIUM,
                 summary=(
-                    "Multiple module-like areas appear to depend on central "
-                    "types, interfaces, schemas, or contract-style directories."
+                    "Contract-style areas "
+                    f"({contract_examples}) appear to be shared by "
+                    f"{contract_ref_count}."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Treat changes "
@@ -917,8 +1078,8 @@ def _analyze_validation_readiness(
         if contract_areas:
             broad_validation_triggers.append(
                 "Likely broad validation trigger: central contract-style areas "
-                f"such as {', '.join(contract_areas[:3])} appear shared across "
-                "multiple modules, so changes there may widen validation scope."
+                f"({contract_examples}) sit on multiple module "
+                "paths, so changes there may widen validation scope."
             )
 
     missing_local_checks = [
@@ -926,18 +1087,28 @@ def _analyze_validation_readiness(
         for candidate in module_candidates
         if not candidate.local_test_paths and not candidate.local_validation_paths
     ]
+    missing_local_check_examples = _format_path_examples(
+        [candidate.path for candidate in missing_local_checks]
+    )
     if missing_local_checks and len(missing_local_checks) >= max(1, len(module_candidates) // 2):
+        missing_local_check_count = _counted_phrase(
+            len(missing_local_checks),
+            "module-like area",
+            "module-like areas",
+        )
         validation_blockers.append(
-            "Possible blocker to affected-only validation: many module-like "
-            "areas do not show module-local tests or validation files."
+            "Possible blocker to affected-only validation: "
+            f"{missing_local_check_count} ({missing_local_check_examples}) "
+            "do not show module-local tests or validation files, so there is "
+            "less structural evidence for narrow validation boundaries."
         )
         findings.append(
             Finding(
                 kind="validation-readiness",
                 severity=FindingSeverity.MEDIUM,
                 summary=(
-                    "Many module-like areas do not show local tests or "
-                    "validation files."
+                    f"{missing_local_check_count} do not show local tests or "
+                    f"validation files ({missing_local_check_examples})."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Add or "
@@ -949,21 +1120,26 @@ def _analyze_validation_readiness(
         )
         manual_review_recommendations.append(
             "Prefer module-local tests or validation commands if advisory "
-            "affected-scope validation is a future goal."
+            "affected-scope validation is a future goal, especially for "
+            f"{missing_local_check_examples}."
         )
 
     if global_cross_boundary_internal_paths:
         validation_blockers.append(
-            "Possible blocker to affected-only validation: some files appear "
-            "to reference multiple module internals directly."
+            "Possible blocker to affected-only validation: "
+            f"{_counted_phrase(len(global_cross_boundary_internal_paths), 'file', 'files')} "
+            f"such as {_format_path_examples(global_cross_boundary_internal_paths)} "
+            "appear to reference multiple module internals directly, which can "
+            "force broader bootstrap-level validation."
         )
         findings.append(
             Finding(
                 kind="validation-readiness",
                 severity=FindingSeverity.MEDIUM,
                 summary=(
-                    "Some files appear to reach into multiple module internals "
-                    "directly."
+                    "Files such as "
+                    f"{_format_path_examples(global_cross_boundary_internal_paths)} "
+                    "appear to reach into multiple module internals directly."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Prefer module "
@@ -975,26 +1151,36 @@ def _analyze_validation_readiness(
         )
         manual_review_recommendations.append(
             "Check whether central bootstrap files and feature code can depend "
-            "on module entrypoints instead of internal module files."
+            "on module entrypoints instead of internal module files, especially "
+            f"for {_format_path_examples(global_cross_boundary_internal_paths)}."
         )
         broad_validation_triggers.append(
             "Likely broad validation trigger: files such as "
-            f"{', '.join(global_cross_boundary_internal_paths[:3])} appear to "
+            f"{global_cross_boundary_examples} appear to "
             "reach into multiple module internals directly."
         )
 
     if edge_functions_with_shared_refs:
+        edge_function_paths = [candidate.path for candidate in edge_functions_with_shared_refs]
+        edge_function_examples = _format_path_examples(edge_function_paths)
+        edge_function_count = _counted_phrase(
+            len(edge_functions_with_shared_refs),
+            "edge-function folder",
+            "edge-function folders",
+        )
         validation_blockers.append(
-            "Possible blocker to affected-only validation: some edge-function "
-            "folders look isolated by layout but still depend on shared/core areas."
+            "Possible blocker to affected-only validation: "
+            f"{edge_function_count} ({edge_function_examples}) look isolated by "
+            "layout but still depend on shared/core areas."
         )
         findings.append(
             Finding(
                 kind="validation-readiness",
                 severity=FindingSeverity.MEDIUM,
                 summary=(
-                    "Some edge-function folders look isolated by layout but "
-                    "still appear to depend on shared/core areas."
+                    "Edge-function folders "
+                    f"({edge_function_examples}) look isolated by "
+                    "layout but still appear to depend on shared/core areas."
                 ),
                 recommendation=(
                     "Heuristic only. Manual review recommended. Treat changes "
@@ -1005,9 +1191,10 @@ def _analyze_validation_readiness(
             )
         )
         broad_validation_triggers.append(
-            "Likely broad validation trigger: some edge-function or service-style "
-            "folders still depend on shared/core internals, so changes in those "
-            "shared areas may widen validation beyond one isolated folder."
+            "Likely broad validation trigger: edge-function or service-style "
+            f"folders ({edge_function_examples}) still depend "
+            "on shared/core internals, so changes in those shared areas may widen "
+            "validation beyond one isolated folder."
         )
 
     narrow_validation_candidates = sorted(
@@ -1115,9 +1302,13 @@ def _detect_duplicated_module_responsibility(
     )
 
 
-def _detect_duplicate_docs(records: list[FileRecord]) -> tuple[set[str], list[Finding]]:
+def _detect_duplicate_docs(
+    records: list[FileRecord],
+    config_summary: RepoConfigSummary,
+) -> tuple[set[str], list[Finding], list[SuppressedFinding]]:
     duplicate_paths: set[str] = set()
     findings: list[Finding] = []
+    suppressed_findings: list[SuppressedFinding] = []
     docs = [record for record in records if record.suffix in MARKDOWN_SUFFIXES]
     grouped_docs = _group_docs_by_family(docs)
 
@@ -1148,8 +1339,46 @@ def _detect_duplicate_docs(records: list[FileRecord]) -> tuple[set[str], list[Fi
         if len(deduped) < 2:
             continue
 
-        canonical_present = any(record.lowered_path in CANONICAL_CHAIN_LOWER for record in deduped)
+        active_records: list[FileRecord] = []
         for record in deduped:
+            counterpart_paths = [
+                other.relative_path
+                for other in deduped
+                if other.relative_path != record.relative_path
+            ]
+            mirror_match = _find_publish_mirror_counterpart(
+                record.relative_path,
+                counterpart_paths,
+                config_summary.mirrored_docs,
+            )
+            if mirror_match is None:
+                active_records.append(record)
+                continue
+
+            mirror, counterpart = mirror_match
+            suppressed_findings.append(
+                SuppressedFinding(
+                    kind="duplicate-docs",
+                    summary=(
+                        "Configured mirrored documentation suppressed expected "
+                        f"duplicate-docs noise for '{record.relative_path}'."
+                    ),
+                    reason=(
+                        "Configured mirrored docs: "
+                        f"`{mirror.source}` -> `{mirror.publish}` with source "
+                        f"counterpart `{counterpart}`."
+                    ),
+                    paths=sorted({record.relative_path, counterpart}),
+                )
+            )
+
+        if len(active_records) < 2:
+            continue
+
+        canonical_present = any(
+            record.lowered_path in CANONICAL_CHAIN_LOWER for record in active_records
+        )
+        for record in active_records:
             if record.lowered_path not in CANONICAL_CHAIN_LOWER:
                 duplicate_paths.add(record.relative_path)
 
@@ -1165,18 +1394,20 @@ def _detect_duplicate_docs(records: list[FileRecord]) -> tuple[set[str], list[Fi
                     "Choose one canonical file, merge any missing content, "
                     "then archive or remove the verified duplicate variants."
                 ),
-                paths=[record.relative_path for record in deduped],
+                paths=[record.relative_path for record in active_records],
             )
         )
 
-    return duplicate_paths, findings
+    return duplicate_paths, findings, _dedupe_suppressed_findings(suppressed_findings)
 
 
 def _detect_unclear_authority(
     records: list[FileRecord],
-) -> tuple[dict[str, list[str]], list[Finding]]:
+    config_summary: RepoConfigSummary,
+) -> tuple[dict[str, list[str]], list[Finding], list[SuppressedFinding]]:
     unclear_paths: dict[str, list[str]] = {}
     findings: list[Finding] = []
+    suppressed_findings: list[SuppressedFinding] = []
     docs = [record for record in records if record.suffix in MARKDOWN_SUFFIXES]
     grouped_docs = _group_docs_by_family(docs)
 
@@ -1189,17 +1420,55 @@ def _detect_unclear_authority(
         if not noncanonical:
             continue
 
+        active_noncanonical: list[FileRecord] = []
         reasons = [f"Looks like a governance doc outside the canonical location '{expected_path}'."]
         for record in noncanonical:
+            counterpart_paths = [
+                other.relative_path
+                for other in group
+                if other.relative_path != record.relative_path
+            ]
+            mirror_match = _find_publish_mirror_counterpart(
+                record.relative_path,
+                counterpart_paths,
+                config_summary.mirrored_docs,
+            )
+            if mirror_match is not None:
+                mirror, counterpart = mirror_match
+                suppressed_findings.append(
+                    SuppressedFinding(
+                        kind="unclear-authority",
+                        summary=(
+                            "Configured mirrored documentation suppressed expected "
+                            f"unclear-authority noise for '{record.relative_path}'."
+                        ),
+                        reason=(
+                            "Configured mirrored docs: "
+                            f"`{mirror.source}` -> `{mirror.publish}` with source "
+                            f"counterpart `{counterpart}`."
+                        ),
+                        paths=sorted({record.relative_path, counterpart}),
+                    )
+                )
+                continue
+
+            active_noncanonical.append(record)
             unclear_paths[record.relative_path] = reasons
 
-        if len(group) == 1 and group[0].lowered_path != expected_path.lower():
+        if not active_noncanonical:
+            continue
+
+        active_group = [
+            record for record in group if record.lowered_path == expected_path.lower()
+        ] + active_noncanonical
+
+        if len(active_group) == 1 and active_group[0].lowered_path != expected_path.lower():
             findings.append(
                 Finding(
                     kind="unclear-authority",
                     severity=FindingSeverity.MEDIUM,
                     summary=(
-                        f"'{group[0].relative_path}' appears to act as a "
+                        f"'{active_group[0].relative_path}' appears to act as a "
                         f"'{family}' authority file, but the canonical path is "
                         "missing."
                     ),
@@ -1207,10 +1476,10 @@ def _detect_unclear_authority(
                         f"Either move this content to '{expected_path}' or "
                         "declare a different canonical authority explicitly."
                     ),
-                    paths=[group[0].relative_path],
+                    paths=[active_group[0].relative_path],
                 )
             )
-        elif len(group) > 1:
+        elif len(active_group) > 1:
             findings.append(
                 Finding(
                     kind="unclear-authority",
@@ -1222,11 +1491,11 @@ def _detect_unclear_authority(
                         f"Normalize authority around '{expected_path}' and "
                         "demote or archive the variants."
                     ),
-                    paths=[record.relative_path for record in group],
+                    paths=[record.relative_path for record in active_group],
                 )
             )
 
-    return unclear_paths, findings
+    return unclear_paths, findings, _dedupe_suppressed_findings(suppressed_findings)
 
 
 def _detect_partial_migrations(records: list[FileRecord]) -> list[Finding]:
@@ -1705,36 +1974,51 @@ def _build_validation_scope_candidate(
 ) -> ValidationScopeCandidate:
     reasons: list[str] = []
     if candidate.entrypoints:
-        reasons.append("Clear local entrypoints were detected.")
+        reasons.append(
+            "Entrypoints detected: "
+            f"{_format_path_examples(candidate.entrypoints)}."
+        )
     if candidate.registration_paths:
-        reasons.append("Explicit registration or bootstrap references were detected.")
+        reasons.append(
+            "Registration or bootstrap references detected from "
+            f"{_format_path_examples(candidate.registration_paths)}."
+        )
     elif candidate.kind == "edge-function":
         reasons.append(
-            "The folder layout looks isolated in an edge-function-style container."
+            "Edge-function-style container layout detected for "
+            f"`{candidate.path}`."
         )
     if candidate.local_test_paths or candidate.local_validation_paths:
-        reasons.append("Local tests or validation files were detected.")
+        local_check_paths = candidate.local_test_paths + candidate.local_validation_paths
+        reasons.append(
+            "Local checks detected: "
+            f"{_format_path_examples(local_check_paths)}."
+        )
     if candidate.local_manifest_paths:
-        reasons.append("A local manifest or package declaration was detected.")
+        reasons.append(
+            "Local manifest or package declaration detected: "
+            f"{_format_path_examples(candidate.local_manifest_paths)}."
+        )
     if not candidate.shared_core_reference_paths:
         reasons.append(
-            "No shared/core references were detected inside this module-like area."
+            "No shared/core references were detected in scanned files under "
+            f"`{candidate.path}`."
         )
     if not candidate.cross_boundary_internal_reference_paths:
         reasons.append(
-            "No cross-boundary internal references were detected inside this "
-            "module-like area."
+            "No direct cross-boundary internal references were detected in "
+            f"scanned files under `{candidate.path}`."
         )
 
     advisory_notes = [
         "Heuristic only. Manual review recommended before treating this area "
-        "as a narrow validation candidate.",
+        f"(`{candidate.path}`) as a narrow validation candidate.",
         "No actual changed-file or dependency impact analysis is being performed.",
     ]
     if not candidate.local_manifest_paths:
         advisory_notes.append(
-            "A local manifest or module-level script declaration was not "
-            "detected, so the boundary is still inferred from layout and local checks."
+            "No local manifest or module-level script declaration was detected, "
+            "so this boundary is still inferred from layout, entrypoints, and local checks."
         )
     if repo_has_broad_triggers:
         advisory_notes.append(
@@ -1853,6 +2137,256 @@ def _dir_name(relative_path: str) -> str:
 
 def _dedupe_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _counted_phrase(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _format_path_examples(paths: list[str], *, limit: int = 3) -> str:
+    if not paths:
+        return "no examples captured"
+
+    unique_paths = list(dict.fromkeys(paths))
+    formatted = ", ".join(f"`{path}`" for path in unique_paths[:limit])
+    remaining = len(unique_paths) - limit
+    if remaining > 0:
+        return f"{formatted} (+{remaining} more)"
+    return formatted
+
+
+def _load_config_path_list(
+    raw_value: object,
+    *,
+    field_name: str,
+) -> list[str]:
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list):
+        raise ValueError(f"'{field_name}' must be a list of repo-relative path patterns.")
+
+    normalized_paths: list[str] = []
+    for item in raw_value:
+        if not isinstance(item, str):
+            raise ValueError(f"'{field_name}' entries must be strings.")
+        normalized_paths.append(_normalize_config_path(item, field_name=field_name))
+
+    return list(dict.fromkeys(normalized_paths))
+
+
+def _load_mirrored_docs_config(raw_value: object) -> list[ConfiguredMirror]:
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list):
+        raise ValueError("'mirrored_docs' must be a list of {source, publish} tables.")
+
+    mirrors: list[ConfiguredMirror] = []
+    for item in raw_value:
+        if not isinstance(item, dict):
+            raise ValueError("'mirrored_docs' entries must be tables.")
+
+        source = item.get("source")
+        publish = item.get("publish")
+        if not isinstance(source, str) or not isinstance(publish, str):
+            raise ValueError(
+                "'mirrored_docs' entries must include string 'source' and 'publish' paths."
+            )
+
+        mirrors.append(
+            ConfiguredMirror(
+                source=_normalize_config_path(source, field_name="mirrored_docs.source"),
+                publish=_normalize_config_path(
+                    publish,
+                    field_name="mirrored_docs.publish",
+                ),
+            )
+        )
+
+    deduped: dict[tuple[str, str], ConfiguredMirror] = {}
+    for mirror in mirrors:
+        deduped[(mirror.source, mirror.publish)] = mirror
+    return list(deduped.values())
+
+
+def _load_advisory_suppressions_config(
+    raw_value: object,
+) -> list[ConfiguredSuppression]:
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list):
+        raise ValueError(
+            "'advisory_suppressions' must be a list of {finding, path_pattern, reason} tables."
+        )
+
+    suppressions: list[ConfiguredSuppression] = []
+    for item in raw_value:
+        if not isinstance(item, dict):
+            raise ValueError("'advisory_suppressions' entries must be tables.")
+
+        finding = item.get("finding")
+        path_pattern = item.get("path_pattern")
+        reason = item.get("reason")
+        if not isinstance(finding, str) or not isinstance(path_pattern, str):
+            raise ValueError(
+                "'advisory_suppressions' entries must include string 'finding' "
+                "and 'path_pattern' values."
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                "'advisory_suppressions' entries must include a non-empty 'reason'."
+            )
+
+        suppressions.append(
+            ConfiguredSuppression(
+                finding=finding.strip(),
+                path_pattern=_normalize_config_path(
+                    path_pattern,
+                    field_name="advisory_suppressions.path_pattern",
+                ),
+                reason=reason.strip(),
+            )
+        )
+
+    deduped: dict[tuple[str, str, str], ConfiguredSuppression] = {}
+    for suppression in suppressions:
+        key = (
+            suppression.finding,
+            suppression.path_pattern,
+            suppression.reason,
+        )
+        deduped[key] = suppression
+    return list(deduped.values())
+
+
+def _normalize_config_path(value: str, *, field_name: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = re.sub(r"/+", "/", normalized).rstrip("/")
+
+    if not normalized or normalized == ".":
+        raise ValueError(f"'{field_name}' entries must not be empty.")
+    if Path(normalized).is_absolute() or normalized.startswith("/"):
+        raise ValueError(f"'{field_name}' entries must be repo-relative paths.")
+
+    return normalized
+
+
+def _path_matches_any(relative_path: str, patterns: list[str]) -> bool:
+    return any(_path_matches_pattern(relative_path, pattern) for pattern in patterns)
+
+
+def _path_matches_pattern(relative_path: str, pattern: str) -> bool:
+    normalized_path = relative_path.replace("\\", "/").casefold()
+    normalized_pattern = pattern.replace("\\", "/").casefold()
+    return (
+        fnmatch.fnmatch(normalized_path, normalized_pattern)
+        or normalized_path == normalized_pattern
+        or normalized_path.startswith(f"{normalized_pattern}/")
+    )
+
+
+def _apply_advisory_suppressions(
+    findings: list[Finding],
+    config_summary: RepoConfigSummary,
+) -> tuple[list[Finding], list[SuppressedFinding], set[str], set[str]]:
+    if not config_summary.advisory_suppressions:
+        return findings, [], set(), set()
+
+    active_findings: list[Finding] = []
+    suppressed_findings: list[SuppressedFinding] = []
+    suppressed_duplicate_paths: set[str] = set()
+    suppressed_unclear_paths: set[str] = set()
+
+    for finding in findings:
+        matched_suppression = _match_advisory_suppression(
+            finding,
+            config_summary.advisory_suppressions,
+        )
+        if matched_suppression is None:
+            active_findings.append(finding)
+            continue
+
+        suppressed_findings.append(
+            SuppressedFinding(
+                kind=finding.kind,
+                summary=finding.summary,
+                reason=(
+                    "Configured advisory suppression "
+                    f"({matched_suppression.finding} @ "
+                    f"`{matched_suppression.path_pattern}`): "
+                    f"{matched_suppression.reason}"
+                ),
+                paths=finding.paths,
+            )
+        )
+        if finding.kind == "duplicate-docs":
+            suppressed_duplicate_paths.update(finding.paths)
+        if finding.kind == "unclear-authority":
+            suppressed_unclear_paths.update(finding.paths)
+
+    return (
+        active_findings,
+        _dedupe_suppressed_findings(suppressed_findings),
+        suppressed_duplicate_paths,
+        suppressed_unclear_paths,
+    )
+
+
+def _match_advisory_suppression(
+    finding: Finding,
+    suppressions: list[ConfiguredSuppression],
+) -> ConfiguredSuppression | None:
+    for suppression in suppressions:
+        if suppression.finding != finding.kind:
+            continue
+        if not finding.paths:
+            continue
+        if any(_path_matches_pattern(path, suppression.path_pattern) for path in finding.paths):
+            return suppression
+    return None
+
+
+def _find_publish_mirror_counterpart(
+    target_path: str,
+    candidate_paths: list[str],
+    mirrors: list[ConfiguredMirror],
+) -> tuple[ConfiguredMirror, str] | None:
+    for mirror in mirrors:
+        target_tail = _relative_to_base_path(target_path, mirror.publish)
+        if target_tail is None:
+            continue
+
+        for candidate_path in candidate_paths:
+            if _relative_to_base_path(candidate_path, mirror.source) == target_tail:
+                return mirror, candidate_path
+
+    return None
+
+
+def _relative_to_base_path(relative_path: str, base_path: str) -> str | None:
+    normalized_path = relative_path.replace("\\", "/")
+    normalized_base = base_path.replace("\\", "/")
+    if normalized_path == normalized_base:
+        return ""
+    if normalized_path.startswith(f"{normalized_base}/"):
+        return normalized_path[len(normalized_base) + 1 :]
+    return None
+
+
+def _dedupe_suppressed_findings(
+    findings: list[SuppressedFinding],
+) -> list[SuppressedFinding]:
+    deduped: dict[tuple[str, str, str, tuple[str, ...]], SuppressedFinding] = {}
+    for finding in findings:
+        key = (
+            finding.kind,
+            finding.summary,
+            finding.reason,
+            tuple(finding.paths),
+        )
+        deduped[key] = finding
+    return list(deduped.values())
 
 
 def _is_generated(record: FileRecord) -> bool:

@@ -20,14 +20,55 @@ def render_report(
 
 def render_text_report(report: RepoReport, *, include_supporting: bool = False) -> str:
     counts = report.category_counts()
+    config_summary = report.config_summary
     module_boundary = report.module_boundary
     validation_readiness = report.validation_readiness
     lines: list[str] = [
         "Repo Cleanser Report",
         f"Root: {report.root}",
         f"Scanned files: {report.scanned_files}",
-        f"Skipped generated directories: {', '.join(report.skipped_directories) or 'none'}",
+        f"Skipped scan directories: {', '.join(report.skipped_directories) or 'none'}",
         "",
+        "Config:",
+    ]
+
+    if config_summary.path is None:
+        lines.extend(
+            [
+                "- No repo-cleanser.toml config loaded.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"- Loaded config: {config_summary.path}",
+                "- Ignored paths: "
+                + (", ".join(config_summary.ignored_paths) or "none"),
+                "- Known generated paths: "
+                + (", ".join(config_summary.generated_paths) or "none"),
+                "- Known mirrored docs: "
+                + (
+                    ", ".join(
+                        f"{mirror.source} -> {mirror.publish}"
+                        for mirror in config_summary.mirrored_docs
+                    )
+                    or "none"
+                ),
+                "- Advisory suppressions: "
+                + (
+                    ", ".join(
+                        f"{suppression.finding} @ {suppression.path_pattern}"
+                        for suppression in config_summary.advisory_suppressions
+                    )
+                    or "none"
+                ),
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
         "Suggested canonical doc chain:",
         *[f"- {path}" for path in report.canonical_doc_chain],
         "",
@@ -39,7 +80,8 @@ def render_text_report(report: RepoReport, *, include_supporting: bool = False) 
         "",
         "Modularity strengths:",
         "",
-    ]
+        ]
+    )
 
     if module_boundary.strengths:
         lines.extend(f"- {strength}" for strength in module_boundary.strengths)
@@ -95,9 +137,13 @@ def render_text_report(report: RepoReport, *, include_supporting: bool = False) 
         for candidate in validation_readiness.narrow_validation_candidates:
             lines.append(f"- {candidate.path} ({candidate.kind})")
             if candidate.reasons:
-                lines.append(f"  Reasons: {'; '.join(candidate.reasons)}")
+                lines.append(
+                    f"  Signals raising readiness: {'; '.join(candidate.reasons)}"
+                )
             if candidate.advisory_notes:
-                lines.append(f"  Advisory: {'; '.join(candidate.advisory_notes)}")
+                lines.append(
+                    f"  Still advisory because: {'; '.join(candidate.advisory_notes)}"
+                )
     else:
         lines.append(
             "- No module-like areas currently rise above the heuristic bar for "
@@ -135,6 +181,15 @@ def render_text_report(report: RepoReport, *, include_supporting: bool = False) 
             lines.append(f"  Paths: {', '.join(finding.paths)}")
     else:
         lines.append("- No notable duplicate, stale, or migration risk findings.")
+
+    lines.extend(["", "Suppressed findings:"])
+    if report.suppressed_findings:
+        for suppressed_finding in report.suppressed_findings:
+            lines.append(f"- {suppressed_finding.kind}: {suppressed_finding.summary}")
+            lines.append(f"  Reason: {suppressed_finding.reason}")
+            lines.append(f"  Paths: {', '.join(suppressed_finding.paths)}")
+    else:
+        lines.append("- No config-driven suppressions were applied.")
 
     lines.extend(["", "Classified file highlights:"])
     highlights = [

@@ -24,3 +24,14 @@ repo-cleanser/
     ├── test_analyzer.py
     └── test_cli.py
 ```
+
+## Notes
+
+- `README.md`, `AGENTS.md`, and the `docs/` folder make up the canonical doc
+  chain for this repository.
+- `src/repo_cleanser/` contains the CLI, analyzer, report models, and text/JSON
+  rendering logic.
+- `tests/` contains focused analyzer and CLI coverage.
+- Scanned repositories may optionally include a root `repo-cleanser.toml`
+  config file. This repository documents that format but does not need to ship
+  one for itself.

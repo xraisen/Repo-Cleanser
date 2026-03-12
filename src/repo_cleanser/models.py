@@ -140,15 +140,79 @@ class ValidationReadinessSummary:
 
 
 @dataclass(slots=True)
+class ConfiguredMirror:
+    source: str
+    publish: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "publish": self.publish,
+        }
+
+
+@dataclass(slots=True)
+class ConfiguredSuppression:
+    finding: str
+    path_pattern: str
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "finding": self.finding,
+            "path_pattern": self.path_pattern,
+            "reason": self.reason,
+        }
+
+
+@dataclass(slots=True)
+class RepoConfigSummary:
+    path: str | None = None
+    ignored_paths: list[str] = field(default_factory=list)
+    generated_paths: list[str] = field(default_factory=list)
+    mirrored_docs: list[ConfiguredMirror] = field(default_factory=list)
+    advisory_suppressions: list[ConfiguredSuppression] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "ignored_paths": self.ignored_paths,
+            "generated_paths": self.generated_paths,
+            "mirrored_docs": [mirror.to_dict() for mirror in self.mirrored_docs],
+            "advisory_suppressions": [
+                suppression.to_dict() for suppression in self.advisory_suppressions
+            ],
+        }
+
+
+@dataclass(slots=True)
+class SuppressedFinding:
+    kind: str
+    summary: str
+    reason: str
+    paths: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "summary": self.summary,
+            "reason": self.reason,
+            "paths": self.paths,
+        }
+
+
+@dataclass(slots=True)
 class RepoReport:
     root: str
     scanned_files: int
     skipped_directories: list[str]
     canonical_doc_chain: list[str]
+    config_summary: RepoConfigSummary
     module_boundary: ModuleBoundarySummary
     validation_readiness: ValidationReadinessSummary
     assessments: list[FileAssessment]
     findings: list[Finding]
+    suppressed_findings: list[SuppressedFinding]
     recommended_actions: list[str]
     repository_risks: list[str]
 
@@ -162,11 +226,15 @@ class RepoReport:
             "scanned_files": self.scanned_files,
             "skipped_directories": self.skipped_directories,
             "canonical_doc_chain": self.canonical_doc_chain,
+            "config_summary": self.config_summary.to_dict(),
             "module_boundary": self.module_boundary.to_dict(),
             "validation_readiness": self.validation_readiness.to_dict(),
             "category_counts": self.category_counts(),
             "assessments": [assessment.to_dict() for assessment in self.assessments],
             "findings": [finding.to_dict() for finding in self.findings],
+            "suppressed_findings": [
+                finding.to_dict() for finding in self.suppressed_findings
+            ],
             "recommended_actions": self.recommended_actions,
             "repository_risks": self.repository_risks,
         }

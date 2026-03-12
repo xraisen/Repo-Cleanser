@@ -40,6 +40,8 @@ def test_scan_command_renders_text_report(tmp_path: Path) -> None:
     assert "Possible blockers to affected-only validation:" in result.stdout
     assert "Broad validation triggers:" in result.stdout
     assert "Possible narrow validation candidates:" in result.stdout
+    assert "Signals raising readiness:" in result.stdout
+    assert "Still advisory because:" in result.stdout
     assert "Safe-detach risks:" in result.stdout
     assert "Suggested canonical doc chain:" in result.stdout
 
@@ -72,5 +74,27 @@ def test_scan_command_writes_json_report(tmp_path: Path) -> None:
     assert "assessments" in payload
     assert "module_boundary" in payload
     assert "validation_readiness" in payload
+    assert "config_summary" in payload
+    assert "suppressed_findings" in payload
     assert "broad_validation_triggers" in payload["validation_readiness"]
     assert "narrow_validation_candidates" in payload["validation_readiness"]
+
+
+def test_scan_command_reports_loaded_config_and_suppressed_findings(tmp_path: Path) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "orphaned-artifacts"\n'
+        'path_pattern = "scratch-notes.md"\n'
+        'reason = "Intentional local scratch note."\n',
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "scratch-notes.md", "Temporary cleanup notes.\n")
+
+    result = runner.invoke(app, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Config:" in result.stdout
+    assert "Loaded config: repo-cleanser.toml" in result.stdout
+    assert "Suppressed findings:" in result.stdout
+    assert "orphaned-artifacts" in result.stdout
