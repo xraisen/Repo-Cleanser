@@ -432,3 +432,34 @@ def test_advisory_suppression_does_not_hide_grouped_finding_with_unmatched_paths
         and "Publish mirror path only." in finding.reason
         for finding in report.suppressed_findings
     )
+
+
+def test_advisory_suppression_can_target_single_subject_finding_with_context_paths(
+    tmp_path: Path,
+) -> None:
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "safe-detach-risk"\n'
+        'path_pattern = "src/features/payments-old"\n'
+        'reason = "Known legacy area under manual review."\n',
+    )
+    write_file(
+        tmp_path / "src" / "features" / "payments-old" / "index.ts",
+        "export const paymentsOld = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        "import * as paymentsOld from '../features/payments-old';\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "safe-detach-risk" for finding in report.findings)
+    assert any(
+        finding.kind == "safe-detach-risk"
+        and "Known legacy area under manual review." in finding.reason
+        and "src/features/payments-old" in finding.paths
+        and "repo-cleanser.toml" not in finding.paths
+        for finding in report.suppressed_findings
+    )

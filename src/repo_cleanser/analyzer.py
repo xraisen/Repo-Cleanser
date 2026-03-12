@@ -269,6 +269,10 @@ def _load_repo_config(root: Path) -> RepoConfigSummary:
         raw_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ValueError(f"Unable to read '{CONFIG_FILE_NAME}': {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Unable to decode '{CONFIG_FILE_NAME}' as UTF-8: {exc}"
+        ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"Invalid '{CONFIG_FILE_NAME}': {exc}") from exc
 
@@ -461,7 +465,7 @@ def _analyze_module_boundaries(
         for record in records
         if record.suffix in CODE_SUFFIXES and not _is_generated(record)
     ]
-    text_records = [record for record in records if record.text is not None]
+    text_records = [record for record in records if _is_reference_text_record(record)]
     module_candidates = _collect_module_candidates(code_records, text_records)
 
     if not module_candidates:
@@ -518,6 +522,7 @@ def _analyze_module_boundaries(
                         "clear index, route, handler, or manifest."
                     ),
                     paths=[candidate.path, *candidate.external_reference_paths[:3]],
+                    suppression_path=candidate.path,
                 )
             )
 
@@ -541,6 +546,7 @@ def _analyze_module_boundaries(
                         "implicitly, or simply not connected yet."
                     ),
                     paths=[candidate.path],
+                    suppression_path=candidate.path,
                 )
             )
 
@@ -563,6 +569,7 @@ def _analyze_module_boundaries(
                         "runtime dependencies first."
                     ),
                     paths=[candidate.path, *candidate.external_reference_paths[:3]],
+                    suppression_path=candidate.path,
                 )
             )
 
@@ -776,7 +783,7 @@ def _analyze_validation_readiness(
         for record in records
         if record.suffix in CODE_SUFFIXES and not _is_generated(record)
     ]
-    text_records = [record for record in records if record.text is not None]
+    text_records = [record for record in records if _is_reference_text_record(record)]
     shared_core_areas = _collect_shared_core_areas(code_records)
     contract_areas = [
         area
@@ -1590,7 +1597,9 @@ def _detect_orphan_candidates(
     assessments: list[FileAssessment],
 ) -> list[Finding]:
     text_map = {
-        record.relative_path: record.text.lower() for record in records if record.text is not None
+        record.relative_path: record.text.lower()
+        for record in records
+        if record.text is not None and record.name.lower() != CONFIG_FILE_NAME
     }
     suspicious_paths = {
         assessment.path
@@ -1623,16 +1632,18 @@ def _detect_orphan_candidates(
             kind="orphaned-artifacts",
             severity=FindingSeverity.LOW,
             summary=(
-                "Some suspicious files look likely orphaned because they are "
-                "not referenced elsewhere in repository text."
+                f"'{path}' looks likely orphaned because it is not referenced "
+                "elsewhere in repository text."
             ),
             recommendation=(
-                "Manual review is required. Verify they are not used "
-                "indirectly by tooling or human workflows before any "
-                "non-destructive archiving or destructive cleanup."
+                "Manual review is required. Verify it is not used indirectly "
+                "by tooling or human workflows before any non-destructive "
+                "archiving or destructive cleanup."
             ),
-            paths=orphan_candidates,
+            paths=[path],
+            suppression_path=path,
         )
+        for path in orphan_candidates
     ]
 
 
@@ -2139,6 +2150,10 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _is_reference_text_record(record: FileRecord) -> bool:
+    return record.text is not None and record.name.lower() != CONFIG_FILE_NAME
+
+
 def _counted_phrase(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
@@ -2337,12 +2352,17 @@ def _match_advisory_suppression(
     finding: Finding,
     suppressions: list[ConfiguredSuppression],
 ) -> ConfiguredSuppression | None:
+    suppressible_path = finding.suppression_path
     for suppression in suppressions:
         if suppression.finding != finding.kind:
             continue
-        if not finding.paths:
+        if suppressible_path is not None:
+            if _path_matches_pattern(suppressible_path, suppression.path_pattern):
+                return suppression
             continue
-        if all(_path_matches_pattern(path, suppression.path_pattern) for path in finding.paths):
+        if finding.paths and all(
+            _path_matches_pattern(path, suppression.path_pattern) for path in finding.paths
+        ):
             return suppression
     return None
 

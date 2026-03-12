@@ -206,4 +206,21 @@ def render_text_report(report: RepoReport, *, include_supporting: bool = False) 
     else:
         lines.append("- No highlighted files.")
 
-    return "\n".join(lines)
+    return "\n".join(_safe_text(line) for line in lines)
+
+
+def _safe_text(value: str) -> str:
+    safe_fragments: list[str] = []
+    for char in value:
+        if char == "\n":
+            safe_fragments.append("\\n")
+        elif char == "\r":
+            safe_fragments.append("\\r")
+        elif char == "\t":
+            safe_fragments.append("\\t")
+        elif ord(char) < 32 or ord(char) == 127:
+            safe_fragments.append(f"\\x{ord(char):02x}")
+        else:
+            safe_fragments.append(char)
+
+    return "".join(safe_fragments).encode("utf-8", "backslashreplace").decode("utf-8")

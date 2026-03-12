@@ -6,6 +6,19 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from repo_cleanser.cli import app
+from repo_cleanser.models import (
+    FileAssessment,
+    FileCategory,
+    Finding,
+    FindingSeverity,
+    ModuleBoundarySummary,
+    RepoConfigSummary,
+    RepoReport,
+    ReportFormat,
+    SuppressedFinding,
+    ValidationReadinessSummary,
+)
+from repo_cleanser.reporting import render_report
 
 runner = CliRunner()
 
@@ -98,3 +111,75 @@ def test_scan_command_reports_loaded_config_and_suppressed_findings(tmp_path: Pa
     assert "Loaded config: repo-cleanser.toml" in result.stdout
     assert "Suppressed findings:" in result.stdout
     assert "orphaned-artifacts" in result.stdout
+
+
+def test_scan_command_reports_invalid_config_as_controlled_error(tmp_path: Path) -> None:
+    (tmp_path / "repo-cleanser.toml").write_bytes(b"\xff\xfe\x00")
+
+    result = runner.invoke(app, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "Repo Cleanser error:" in result.output
+    assert "Unable to decode 'repo-cleanser.toml' as UTF-8" in result.output
+
+
+def test_scan_command_reports_output_write_error_without_traceback(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    output_dir = tmp_path / "report-output"
+    output_dir.mkdir()
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert "Repo Cleanser error: unable to write report:" in result.output
+    assert "Permission denied" in result.output or "Is a directory" in result.output
+
+
+def test_text_report_escapes_control_and_escape_characters() -> None:
+    report = RepoReport(
+        root="C:/repo/\x1b[31mred",
+        scanned_files=1,
+        skipped_directories=["dist\nnext"],
+        canonical_doc_chain=["README.md"],
+        config_summary=RepoConfigSummary(
+            path="repo-cleanser.toml",
+            ignored_paths=["notes\tarchive"],
+        ),
+        module_boundary=ModuleBoundarySummary(),
+        validation_readiness=ValidationReadinessSummary(),
+        assessments=[
+            FileAssessment(
+                path="scratch\tfile.md",
+                category=FileCategory.TEMPORARY,
+                reasons=["review\nlater"],
+            )
+        ],
+        findings=[
+            Finding(
+                kind="orphaned-artifacts",
+                severity=FindingSeverity.LOW,
+                summary="line1\nline2",
+                recommendation="check\tfirst",
+                paths=["scratch/\x1b[31mnote.md"],
+            )
+        ],
+        suppressed_findings=[
+            SuppressedFinding(
+                kind="duplicate-docs",
+                summary="publish copy",
+                reason="known\nmirror",
+                paths=["public/docs/\x1b[31mguide.md"],
+            )
+        ],
+        recommended_actions=["Review \x1b[31msafely"],
+        repository_risks=["risk\tflag"],
+    )
+
+    rendered = render_report(report, format=ReportFormat.TEXT)
+
+    assert "\x1b" not in rendered
+    assert "line1\\nline2" in rendered
+    assert "check\\tfirst" in rendered
+    assert "dist\\nnext" in rendered
+    assert "scratch/\\x1b[31mnote.md" in rendered
+    assert "review\\nlater" in rendered

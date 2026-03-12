@@ -62,20 +62,47 @@ def scan(
         ),
     ] = False,
 ) -> None:
-    report = analyze_repository(repo_path)
-    rendered = render_report(report, format=format, include_supporting=include_supporting)
+    try:
+        report = analyze_repository(repo_path)
+        rendered = render_report(report, format=format, include_supporting=include_supporting)
 
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8")
-        typer.echo(f"Wrote {format.value} report to {output}")
-        return
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            typer.echo(f"Wrote {format.value} report to {_safe_cli_text(str(output))}")
+            return
 
-    typer.echo(rendered)
+        typer.echo(rendered)
+    except ValueError as exc:
+        typer.echo(f"Repo Cleanser error: {_safe_cli_text(str(exc))}", err=True)
+        raise typer.Exit(code=1) from exc
+    except (OSError, UnicodeError) as exc:
+        typer.echo(
+            f"Repo Cleanser error: unable to write report: {_safe_cli_text(str(exc))}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
 
 
 def main() -> None:
     app()
+
+
+def _safe_cli_text(value: str) -> str:
+    safe_fragments: list[str] = []
+    for char in value:
+        if char == "\n":
+            safe_fragments.append("\\n")
+        elif char == "\r":
+            safe_fragments.append("\\r")
+        elif char == "\t":
+            safe_fragments.append("\\t")
+        elif ord(char) < 32 or ord(char) == 127:
+            safe_fragments.append(f"\\x{ord(char):02x}")
+        else:
+            safe_fragments.append(char)
+
+    return "".join(safe_fragments).encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 if __name__ == "__main__":

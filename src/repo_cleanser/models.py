@@ -50,6 +50,7 @@ class Finding:
     summary: str
     recommendation: str
     paths: list[str] = field(default_factory=list)
+    suppression_path: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
