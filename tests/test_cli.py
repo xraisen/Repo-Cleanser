@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from repo_cleanser.cli import app
+
+runner = CliRunner()
+
+
+def write_file(path: Path, contents: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents, encoding="utf-8")
+
+
+def test_scan_command_renders_text_report(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "docs" / "architecture.md", "Architecture doc.\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const billing = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "billing.test.ts",
+        "import { billing } from './index';\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        "import * as billing from '../features/billing';\n",
+    )
+
+    result = runner.invoke(app, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Repo Cleanser Report" in result.stdout
+    assert "Modularity strengths:" in result.stdout
+    assert "Affected-only readiness strengths:" in result.stdout
+    assert "Possible blockers to affected-only validation:" in result.stdout
+    assert "Broad validation triggers:" in result.stdout
+    assert "Possible narrow validation candidates:" in result.stdout
+    assert "Safe-detach risks:" in result.stdout
+    assert "Suggested canonical doc chain:" in result.stdout
+
+
+def test_scan_command_writes_json_report(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "docs" / "architecture.md", "Architecture doc.\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const billing = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "billing.test.ts",
+        "import { billing } from './index';\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        "import * as billing from '../features/billing';\n",
+    )
+    output_path = tmp_path / "report.json"
+
+    result = runner.invoke(
+        app,
+        ["scan", str(tmp_path), "--format", "json", "--output", str(output_path)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["root"] == str(tmp_path.resolve())
+    assert "assessments" in payload
+    assert "module_boundary" in payload
+    assert "validation_readiness" in payload
+    assert "broad_validation_triggers" in payload["validation_readiness"]
+    assert "narrow_validation_candidates" in payload["validation_readiness"]
