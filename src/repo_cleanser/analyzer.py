@@ -53,6 +53,10 @@ CANONICAL_DOC_FAMILIES = {
     "validation": "docs/validation.md",
     "project-tree": "docs/project-tree.md",
 }
+STRUCTURAL_ROOT_REFERENCE_FILES = CANONICAL_ROOT_FILES - {
+    ".gitignore",
+    CONFIG_FILE_NAME,
+}
 
 TEXT_SUFFIXES = {
     ".cfg",
@@ -90,6 +94,25 @@ CODE_SUFFIXES = {
     ".tsx",
 }
 TEXT_SUFFIXES |= CODE_SUFFIXES
+SLASH_COMMENT_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cs",
+    ".go",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".mjs",
+    ".php",
+    ".rs",
+    ".swift",
+    ".ts",
+    ".tsx",
+}
+HASH_COMMENT_SUFFIXES = {".cfg", ".ini", ".ps1", ".py", ".rb", ".sh", ".toml", ".yaml", ".yml"}
+DASH_COMMENT_SUFFIXES = {".sql"}
+HASH_COMMENT_FILE_NAMES = {"dockerfile", "makefile", "requirements.txt"}
 
 GENERATED_DIR_NAMES = {
     ".cache",
@@ -266,7 +289,7 @@ def _load_repo_config(root: Path) -> RepoConfigSummary:
         return RepoConfigSummary()
 
     try:
-        raw_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        raw_config = tomllib.loads(config_path.read_bytes().decode("utf-8-sig"))
     except OSError as exc:
         raise ValueError(f"Unable to read '{CONFIG_FILE_NAME}': {exc}") from exc
     except UnicodeDecodeError as exc:
@@ -710,7 +733,7 @@ def _build_module_candidate(
             for record in text_records
             if not _is_under_path(record.relative_path, candidate_path)
             and _is_registry_like_record(record)
-            and _text_references_module(record.text, candidate_path)
+            and _text_references_module(_reference_text(record), candidate_path)
         }
     )
     external_reference_paths = sorted(
@@ -718,7 +741,7 @@ def _build_module_candidate(
             record.relative_path
             for record in text_records
             if not _is_under_path(record.relative_path, candidate_path)
-            and _text_references_module(record.text, candidate_path)
+            and _text_references_module(_reference_text(record), candidate_path)
         }
     )
     local_test_paths = sorted(
@@ -813,7 +836,7 @@ def _analyze_validation_readiness(
             {
                 record.relative_path
                 for record in module_text_records
-                if _text_references_shared_core_areas(record.text, shared_core_areas)
+                if _text_references_shared_core_areas(_reference_text(record), shared_core_areas)
             }
         )
         candidate.cross_boundary_internal_reference_paths = sorted(
@@ -848,7 +871,7 @@ def _analyze_validation_readiness(
         for candidate in module_candidates
         if contract_areas
         and any(
-            _text_references_shared_core_areas(record.text, contract_areas)
+            _text_references_shared_core_areas(_reference_text(record), contract_areas)
             for record in text_records
             if _is_under_path(record.relative_path, candidate.path)
         )
@@ -1282,7 +1305,7 @@ def _detect_scattered_internal_registration(
         touched_modules = {
             candidate.path
             for candidate in module_candidates
-            if _text_references_module_internal(record.text, candidate.path)
+            if _text_references_module_internal(_reference_text(record), candidate.path)
         }
         if len(touched_modules) >= 3:
             scattered_paths.append(record.relative_path)
@@ -1597,9 +1620,9 @@ def _detect_orphan_candidates(
     assessments: list[FileAssessment],
 ) -> list[Finding]:
     text_map = {
-        record.relative_path: record.text.lower()
+        record.relative_path: reference_text.lower()
         for record in records
-        if record.text is not None and record.name.lower() != CONFIG_FILE_NAME
+        if (reference_text := _orphan_reference_text(record)) is not None
     }
     suspicious_paths = {
         assessment.path
@@ -1619,7 +1642,7 @@ def _detect_orphan_candidates(
         references = [
             other_path
             for other_path, text in text_map.items()
-            if other_path != path and filename in text
+            if other_path != path and _text_mentions_filename(text, filename)
         ]
         if not references:
             orphan_candidates.append(path)
@@ -1895,15 +1918,11 @@ def _text_references_shared_core_areas(text: str | None, shared_core_areas: list
     if text is None or not shared_core_areas:
         return False
 
-    lowered_text = text.casefold()
     variants: set[str] = set()
     for area in shared_core_areas:
         variants.update(_shared_core_reference_variants(area))
 
-    return any(
-        variant and (f"{variant}/" in lowered_text or f"{variant}\\" in lowered_text)
-        for variant in variants
-    )
+    return _text_references_variants_in_dependency_context(text, variants)
 
 
 def _shared_core_reference_variants(area: str) -> set[str]:
@@ -1932,9 +1951,10 @@ def _references_other_module_internals(
     owner_module_path: str,
     module_candidates: list[ModuleCandidateRecord],
 ) -> bool:
+    reference_text = _reference_text(record)
     return any(
         candidate.path != owner_module_path
-        and _text_references_module_internal(record.text, candidate.path)
+        and _text_references_module_internal(reference_text, candidate.path)
         for candidate in module_candidates
     )
 
@@ -1944,10 +1964,11 @@ def _touches_multiple_module_internals(
     module_candidates: list[ModuleCandidateRecord],
 ) -> bool:
     owner_module_path = _owning_module_path(record.relative_path, module_candidates)
+    reference_text = _reference_text(record)
     touched_modules = {
         candidate.path
         for candidate in module_candidates
-        if _text_references_module_internal(record.text, candidate.path)
+        if _text_references_module_internal(reference_text, candidate.path)
         and candidate.path != owner_module_path
     }
     return len(touched_modules) >= 2
@@ -2095,42 +2116,69 @@ def _text_references_module(text: str | None, candidate_path: str) -> bool:
     if text is None:
         return False
 
-    lowered_text = text.casefold()
     module_name = _dir_name(candidate_path).casefold()
-    path_variants = {
+    variants = {
         candidate_path.casefold(),
         candidate_path.casefold().replace("/", "\\"),
+        module_name,
     }
     if candidate_path.startswith("src/"):
         trimmed_path = candidate_path[4:].casefold()
-        path_variants.add(trimmed_path)
-        path_variants.add(trimmed_path.replace("/", "\\"))
-
-    if any(path_variant and path_variant in lowered_text for path_variant in path_variants):
-        return True
+        variants.add(trimmed_path)
+        variants.add(trimmed_path.replace("/", "\\"))
 
     if len(module_name) < 3:
         return False
 
-    return (
-        re.search(rf"(?<![a-z0-9]){re.escape(module_name)}(?![a-z0-9])", lowered_text)
-        is not None
-    )
+    return _text_references_variants_in_dependency_context(text, variants)
 
 
 def _text_references_module_internal(text: str | None, candidate_path: str) -> bool:
     if text is None:
         return False
 
-    lowered_text = text.casefold()
     module_name = _dir_name(candidate_path).casefold()
     if len(module_name) < 3:
         return False
 
-    return any(
-        f"{module_name}/{token}" in lowered_text or f"{module_name}\\{token}" in lowered_text
+    variants = {
+        f"{module_name}/{token}"
         for token in MODULE_GROUPING_TOKENS
-    )
+    } | {
+        f"{module_name}\\{token}"
+        for token in MODULE_GROUPING_TOKENS
+    }
+    return _text_references_variants_in_dependency_context(text, variants)
+
+
+def _text_references_variants_in_dependency_context(
+    text: str | None,
+    variants: set[str],
+) -> bool:
+    if text is None:
+        return False
+
+    lowered_text = text.casefold()
+    normalized_variants = {variant.casefold() for variant in variants if variant}
+    for variant in normalized_variants:
+        dependency_patterns = (
+            rf'(?m)^\s*import\b[^\n]*\bfrom\s+["\'`][^"\'`\n]*{re.escape(variant)}[^"\'`\n]*["\'`]',
+            rf'(?m)^\s*import\s+["\'`][^"\'`\n]*{re.escape(variant)}[^"\'`\n]*["\'`]',
+            rf'(?<!["\'`])\brequire\(\s*["\'`][^"\'`\n]*{re.escape(variant)}[^"\'`\n]*["\'`]\s*\)',
+            rf'(?<!["\'`])\bimport\(\s*["\'`][^"\'`\n]*{re.escape(variant)}[^"\'`\n]*["\'`]\s*\)',
+        )
+        if any(re.search(pattern, lowered_text) is not None for pattern in dependency_patterns):
+            return True
+
+        dotted_variant = variant.replace("\\", ".").replace("/", ".")
+        python_patterns = (
+            rf"(?m)^\s*from\s+{re.escape(dotted_variant)}(?:\.[a-z0-9_]+)?\s+import\b",
+            rf"(?m)^\s*import\s+{re.escape(dotted_variant)}(?:\.[a-z0-9_]+)?\b",
+        )
+        if any(re.search(pattern, lowered_text) is not None for pattern in python_patterns):
+            return True
+
+    return False
 
 
 def _is_under_path(relative_path: str, candidate_path: str) -> bool:
@@ -2151,7 +2199,53 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 
 def _is_reference_text_record(record: FileRecord) -> bool:
-    return record.text is not None and record.name.lower() != CONFIG_FILE_NAME
+    if record.text is None or record.name.lower() == CONFIG_FILE_NAME:
+        return False
+    if record.suffix in CODE_SUFFIXES:
+        return True
+    if record.name.lower() in STRUCTURAL_ROOT_REFERENCE_FILES:
+        return True
+    if _is_manifest_record(record) or _is_local_validation_record(record):
+        return True
+    return _is_registry_like_record(record) and record.suffix not in MARKDOWN_SUFFIXES
+
+
+def _reference_text(record: FileRecord) -> str | None:
+    if not _is_reference_text_record(record):
+        return None
+    return _strip_comment_like_content(record.text, suffix=record.suffix, name=record.name)
+
+
+def _orphan_reference_text(record: FileRecord) -> str | None:
+    if record.text is None or record.name.lower() in {CONFIG_FILE_NAME, ".gitignore"}:
+        return None
+    return _strip_comment_like_content(record.text, suffix=record.suffix, name=record.name)
+
+
+def _strip_comment_like_content(text: str | None, *, suffix: str, name: str) -> str | None:
+    if text is None:
+        return None
+
+    cleaned = text
+    if suffix in SLASH_COMMENT_SUFFIXES:
+        cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"(?m)(^|[ \t])//[^\n]*$", r"\1", cleaned)
+    if suffix in HASH_COMMENT_SUFFIXES or name.lower() in HASH_COMMENT_FILE_NAMES:
+        cleaned = re.sub(r"(?m)(^|[ \t])#[^\n]*$", r"\1", cleaned)
+    if suffix in DASH_COMMENT_SUFFIXES:
+        cleaned = re.sub(r"(?m)(^|[ \t])--[^\n]*$", r"\1", cleaned)
+
+    return cleaned
+
+
+def _text_mentions_filename(text: str, filename: str) -> bool:
+    escaped = re.escape(filename.casefold())
+    patterns = (
+        rf"(?<![a-z0-9_.-]){escaped}(?![a-z0-9_.-])",
+        rf"[/\\]{escaped}(?![a-z0-9_.-])",
+    )
+    lowered_text = text.casefold()
+    return any(re.search(pattern, lowered_text) is not None for pattern in patterns)
 
 
 def _counted_phrase(count: int, singular: str, plural: str) -> str:
@@ -2207,13 +2301,24 @@ def _load_mirrored_docs_config(raw_value: object) -> list[ConfiguredMirror]:
                 "'mirrored_docs' entries must include string 'source' and 'publish' paths."
             )
 
+        normalized_source = _normalize_config_path(
+            source,
+            field_name="mirrored_docs.source",
+        )
+        normalized_publish = _normalize_config_path(
+            publish,
+            field_name="mirrored_docs.publish",
+        )
+        if _paths_overlap(normalized_source, normalized_publish):
+            raise ValueError(
+                "'mirrored_docs' source and publish paths must be distinct "
+                "non-overlapping repo-relative paths."
+            )
+
         mirrors.append(
             ConfiguredMirror(
-                source=_normalize_config_path(source, field_name="mirrored_docs.source"),
-                publish=_normalize_config_path(
-                    publish,
-                    field_name="mirrored_docs.publish",
-                ),
+                source=normalized_source,
+                publish=normalized_publish,
             )
         )
 
@@ -2251,9 +2356,15 @@ def _load_advisory_suppressions_config(
                 "'advisory_suppressions' entries must include a non-empty 'reason'."
             )
 
+        normalized_finding = finding.strip()
+        if not normalized_finding:
+            raise ValueError(
+                "'advisory_suppressions' entries must include a non-empty 'finding'."
+            )
+
         suppressions.append(
             ConfiguredSuppression(
-                finding=finding.strip(),
+                finding=normalized_finding,
                 path_pattern=_normalize_config_path(
                     path_pattern,
                     field_name="advisory_suppressions.path_pattern",
@@ -2281,8 +2392,16 @@ def _normalize_config_path(value: str, *, field_name: str) -> str:
 
     if not normalized or normalized == ".":
         raise ValueError(f"'{field_name}' entries must not be empty.")
-    if Path(normalized).is_absolute() or normalized.startswith("/"):
+    if (
+        Path(normalized).is_absolute()
+        or normalized.startswith("/")
+        or re.match(r"^[a-zA-Z]:", normalized)
+    ):
         raise ValueError(f"'{field_name}' entries must be repo-relative paths.")
+    if ".." in normalized.split("/"):
+        raise ValueError(
+            f"'{field_name}' entries must stay inside the repository path space."
+        )
 
     return normalized
 
@@ -2298,6 +2417,16 @@ def _path_matches_pattern(relative_path: str, pattern: str) -> bool:
         fnmatch.fnmatch(normalized_path, normalized_pattern)
         or normalized_path == normalized_pattern
         or normalized_path.startswith(f"{normalized_pattern}/")
+    )
+
+
+def _paths_overlap(path_a: str, path_b: str) -> bool:
+    normalized_a = path_a.replace("\\", "/").casefold()
+    normalized_b = path_b.replace("\\", "/").casefold()
+    return (
+        normalized_a == normalized_b
+        or normalized_a.startswith(f"{normalized_b}/")
+        or normalized_b.startswith(f"{normalized_a}/")
     )
 
 

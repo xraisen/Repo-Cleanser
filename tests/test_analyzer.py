@@ -463,3 +463,354 @@ def test_advisory_suppression_can_target_single_subject_finding_with_context_pat
         and "repo-cleanser.toml" not in finding.paths
         for finding in report.suppressed_findings
     )
+
+
+def test_documentation_mentions_do_not_create_safe_detach_risk(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "payments-old" / "index.ts",
+        "export const paymentsOld = {};\n",
+    )
+    write_file(
+        tmp_path / "docs" / "architecture.md",
+        "Legacy note: src/features/payments-old still exists.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "safe-detach-risk" for finding in report.findings)
+
+
+def test_documentation_mentions_do_not_create_cross_boundary_validation_blocker(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const billing = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "features" / "orders" / "index.ts",
+        "export const orders = {};\n",
+    )
+    write_file(
+        tmp_path / "docs" / "architecture.md",
+        "Uses billing/services and orders/controllers internally.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(
+        finding.kind == "validation-readiness"
+        and "docs/architecture.md" in finding.paths
+        for finding in report.findings
+    )
+    assert not any(
+        "docs/architecture.md" in blocker
+        for blocker in report.validation_readiness.validation_blockers
+    )
+    assert not any(
+        "docs/architecture.md" in trigger
+        for trigger in report.validation_readiness.broad_validation_triggers
+    )
+
+
+def test_repo_config_accepts_utf8_bom(tmp_path: Path) -> None:
+    (tmp_path / "repo-cleanser.toml").write_bytes(
+        '\ufeffignored_paths = ["dist"]\n'.encode()
+    )
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "dist" / "ignored.txt", "generated\n")
+
+    report = analyze_repository(tmp_path)
+
+    assert report.config_summary.ignored_paths == ["dist"]
+    assert "dist" in report.skipped_directories
+
+
+def test_gitignore_mentions_do_not_count_as_structural_references(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / ".gitignore", "src/features/payments-old/\n")
+    write_file(
+        tmp_path / "src" / "features" / "payments-old" / "index.ts",
+        "export const paymentsOld = {};\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "safe-detach-risk" for finding in report.findings)
+
+
+def test_comment_only_module_mentions_do_not_create_safe_detach_risk(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "payments-old" / "index.ts",
+        "export const paymentsOld = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        "// TODO remove src/features/payments-old later\nexport const router = {};\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "safe-detach-risk" for finding in report.findings)
+
+
+def test_comment_only_internal_mentions_do_not_create_validation_blocker(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const billing = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "features" / "orders" / "index.ts",
+        "export const orders = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "main.ts",
+        "// billing/services and orders/controllers are legacy\nexport const main = {};\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(
+        finding.kind == "validation-readiness" and "src/main.ts" in finding.paths
+        for finding in report.findings
+    )
+    assert not any(
+        "src/main.ts" in blocker for blocker in report.validation_readiness.validation_blockers
+    )
+    assert not any(
+        "src/main.ts" in trigger
+        for trigger in report.validation_readiness.broad_validation_triggers
+    )
+
+
+def test_gitignore_entries_do_not_prevent_orphan_detection(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / ".gitignore", "scratch-notes.md\n")
+    write_file(tmp_path / "scratch-notes.md", "Temporary cleanup notes.\n")
+
+    report = analyze_repository(tmp_path)
+
+    assert any(finding.kind == "orphaned-artifacts" for finding in report.findings)
+
+
+def test_near_match_filename_does_not_hide_orphan_candidate(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "scratch-app.md", "Temporary cleanup notes.\n")
+    write_file(
+        tmp_path / "docs" / "validation.md",
+        "See my-scratch-app.md before cleanup.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert any(
+        finding.kind == "orphaned-artifacts" and "scratch-app.md" in finding.paths
+        for finding in report.findings
+    )
+
+
+def test_exact_filename_reference_still_prevents_orphan_candidate(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(tmp_path / "scratch-app.md", "Temporary cleanup notes.\n")
+    write_file(
+        tmp_path / "docs" / "validation.md",
+        "See ./scratch-app.md before cleanup.\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(
+        finding.kind == "orphaned-artifacts" and "scratch-app.md" in finding.paths
+        for finding in report.findings
+    )
+
+
+def test_repo_config_rejects_parent_traversal_patterns(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        'ignored_paths = ["../outside"]\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "must stay inside the repository path space" in str(exc)
+    else:
+        raise AssertionError("Expected parent-traversal config path to be rejected.")
+
+
+def test_repo_config_rejects_drive_relative_patterns(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        'ignored_paths = ["C:tmp"]\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "repo-relative paths" in str(exc)
+    else:
+        raise AssertionError("Expected drive-relative config path to be rejected.")
+
+
+def test_plain_variable_name_does_not_count_as_module_registration(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const feature = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        "const billing = true;\nexport const router = billing;\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not report.module_boundary.candidate_modules[0].registration_paths
+    assert any(finding.kind == "module-boundary" for finding in report.findings)
+
+
+def test_repo_config_rejects_blank_suppression_finding(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[advisory_suppressions]]\n"
+        'finding = "   "\n'
+        'path_pattern = "scratch-notes.md"\n'
+        'reason = "Intentional local scratch note."\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "non-empty 'finding'" in str(exc)
+    else:
+        raise AssertionError("Expected blank suppression finding to be rejected.")
+
+
+def test_repo_config_rejects_overlapping_mirror_paths(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "repo-cleanser.toml",
+        "[[mirrored_docs]]\n"
+        'source = "documentation"\n'
+        'publish = "documentation/public"\n',
+    )
+
+    try:
+        analyze_repository(tmp_path)
+    except ValueError as exc:
+        assert "distinct non-overlapping" in str(exc)
+    else:
+        raise AssertionError("Expected overlapping mirrored-doc roots to be rejected.")
+
+
+def test_string_literal_path_does_not_create_safe_detach_risk(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "payments-old" / "index.ts",
+        "export const paymentsOld = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "app" / "router.ts",
+        'const msg = "src/features/payments-old is legacy";\nexport const router = msg;\n',
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(finding.kind == "safe-detach-risk" for finding in report.findings)
+
+
+def test_string_literal_internal_paths_do_not_create_validation_blocker(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const billing = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "features" / "orders" / "index.ts",
+        "export const orders = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "main.ts",
+        'const msg = "billing/services and orders/controllers are legacy";\n'
+        "export const main = msg;\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(
+        finding.kind == "validation-readiness" and "src/main.ts" in finding.paths
+        for finding in report.findings
+    )
+    assert not any(
+        "src/main.ts" in blocker for blocker in report.validation_readiness.validation_blockers
+    )
+    assert not any(
+        "src/main.ts" in trigger
+        for trigger in report.validation_readiness.broad_validation_triggers
+    )
+
+
+def test_string_literal_shared_core_paths_do_not_count_as_dependency_pressure(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        'const msg = "shared/contracts/billing is legacy";\nexport const x = msg;\n',
+    )
+    write_file(
+        tmp_path / "src" / "features" / "orders" / "index.ts",
+        'const msg = "shared/contracts/orders is legacy";\nexport const x = msg;\n',
+    )
+    write_file(
+        tmp_path / "src" / "shared" / "contracts" / "billing.ts",
+        "export const billingContract = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "shared" / "contracts" / "orders.ts",
+        "export const orderContract = {};\n",
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not any(
+        "appear to reference shared/core code directly" in risk
+        for risk in report.validation_readiness.shared_core_coupling_risks
+    )
+    assert not any(
+        finding.kind == "shared-core-coupling"
+        and "src/features/billing" in finding.paths
+        for finding in report.findings
+    )
+
+
+def test_string_literal_import_text_does_not_count_as_module_registration(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path / "README.md", "# Repo\n")
+    write_file(
+        tmp_path / "src" / "features" / "billing" / "index.ts",
+        "export const feature = {};\n",
+    )
+    write_file(
+        tmp_path / "src" / "main.ts",
+        'const msg = \'import "billing"\';\nexport const main = msg;\n',
+    )
+
+    report = analyze_repository(tmp_path)
+
+    assert not report.module_boundary.candidate_modules[0].registration_paths

@@ -98,6 +98,9 @@ declare:
 
 Those settings can reduce expected noise, but they do not silently turn risky
 areas into `safe` ones. Suppressed findings remain visible in the report.
+Config path patterns must stay inside the repository path space. Mirrored-doc
+source and publish roots must be distinct non-overlapping paths, and advisory
+suppression kinds must be explicit non-empty strings.
 
 Current module-boundary analysis is intentionally generic. It looks for
 module-like folders, local entrypoints, bootstrap or registry references,
@@ -112,6 +115,12 @@ smallest-safe affected-scope validation, with shared/core concentration and
 cross-boundary coupling treated as first-class blockers. It separates likely
 broad validation triggers from possible narrow validation candidates while
 explicitly avoiding a readiness score.
+
+Reference heuristics are intentionally narrower than a raw text grep. They
+exclude `repo-cleanser.toml`, `.gitignore`, markdown docs, comment-only text,
+and plain string literals from dependency-like registration or coupling
+signals. The analyzer tries to treat import-like dependency contexts as
+stronger evidence than incidental mentions.
 
 ## Limitations
 

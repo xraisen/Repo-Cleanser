@@ -57,6 +57,23 @@ Run the full validation script:
 uv run python scripts/validate.py
 ```
 
+## Regression Guardrails
+
+The current test suite explicitly guards against these bug classes so they do
+not quietly reappear:
+
+- grouped findings being suppressed too broadly
+- single-subject findings with context paths becoming impossible to suppress
+- `repo-cleanser.toml` or `.gitignore` text being mistaken for real references
+- markdown docs, comment-only text, or plain string literals looking like live
+  imports, module registration, or shared/core coupling
+- orphan detection being suppressed by ignore-file mentions or loose string
+  matches, including near-match filenames like `draft-plan.md.backup`
+- invalid UTF-8 or BOM-prefixed config files failing in uncontrolled ways
+- unsafe control or escape characters leaking into terminal report output
+- config paths escaping the repository path space
+- mirrored-doc roots overlapping or suppression finding kinds being blank
+
 ## Fallback Behavior
 
 `scripts/validate.py` falls back to `python -m uv` automatically when `uv` is

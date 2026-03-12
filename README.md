@@ -224,13 +224,16 @@ reason = "Intentional local scratch note."
 Config rules:
 
 - `ignored_paths` and `generated_paths` are repo-relative path patterns
+- config path patterns must stay inside the repository path space
 - ignored paths are skipped during scanning
 - generated paths reduce expected noise from build or publish output, but do
   not suppress unrelated structural findings
 - `mirrored_docs` declares expected source-to-publish doc mirrors so publish
   targets do not generate duplicate-noise on their own
+- mirrored doc roots must be distinct non-overlapping paths
 - `advisory_suppressions` silence selected advisory findings, but they remain
   visible in the report under `Suppressed findings`
+- `advisory_suppressions.finding` must be explicit and non-empty
 - prefer `mirrored_docs` for expected publish copies instead of using a broad
   suppression for grouped duplicate-doc findings
 - config can reduce expected noise, but it does not mark any path as safe

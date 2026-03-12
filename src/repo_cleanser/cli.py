@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 from typing import Annotated
 
@@ -97,12 +98,25 @@ def _safe_cli_text(value: str) -> str:
             safe_fragments.append("\\r")
         elif char == "\t":
             safe_fragments.append("\\t")
-        elif ord(char) < 32 or ord(char) == 127:
-            safe_fragments.append(f"\\x{ord(char):02x}")
+        elif _is_unsafe_cli_char(char):
+            safe_fragments.append(_escape_unsafe_cli_char(char))
         else:
             safe_fragments.append(char)
 
     return "".join(safe_fragments).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _is_unsafe_cli_char(char: str) -> bool:
+    return ord(char) < 32 or ord(char) == 127 or unicodedata.category(char).startswith("C")
+
+
+def _escape_unsafe_cli_char(char: str) -> str:
+    codepoint = ord(char)
+    if codepoint <= 0xFF:
+        return f"\\x{codepoint:02x}"
+    if codepoint <= 0xFFFF:
+        return f"\\u{codepoint:04x}"
+    return f"\\U{codepoint:08x}"
 
 
 if __name__ == "__main__":

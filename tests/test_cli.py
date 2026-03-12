@@ -137,7 +137,7 @@ def test_scan_command_reports_output_write_error_without_traceback(tmp_path: Pat
 
 def test_text_report_escapes_control_and_escape_characters() -> None:
     report = RepoReport(
-        root="C:/repo/\x1b[31mred",
+        root="C:/repo/\x1b[31mred\u202e",
         scanned_files=1,
         skipped_directories=["dist\nnext"],
         canonical_doc_chain=["README.md"],
@@ -167,7 +167,7 @@ def test_text_report_escapes_control_and_escape_characters() -> None:
             SuppressedFinding(
                 kind="duplicate-docs",
                 summary="publish copy",
-                reason="known\nmirror",
+                reason="known\nmirror\u202e",
                 paths=["public/docs/\x1b[31mguide.md"],
             )
         ],
@@ -178,8 +178,10 @@ def test_text_report_escapes_control_and_escape_characters() -> None:
     rendered = render_report(report, format=ReportFormat.TEXT)
 
     assert "\x1b" not in rendered
+    assert "\u202e" not in rendered
     assert "line1\\nline2" in rendered
     assert "check\\tfirst" in rendered
     assert "dist\\nnext" in rendered
     assert "scratch/\\x1b[31mnote.md" in rendered
     assert "review\\nlater" in rendered
+    assert "\\u202e" in rendered
